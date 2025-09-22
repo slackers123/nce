@@ -222,6 +222,7 @@ impl<'src> Parsable<'src> for Type<'src> {
 pub enum Stmt<'src> {
     Expr(ExprStmt<'src>),
     Return(),
+    /// let
     Def(),
     If(),
     While(),
@@ -243,6 +244,8 @@ pub enum Expr<'src> {
     FnCall(FnCallExpr<'src>),
     Literal(LitExpr),
     Bin(BinExpr<'src>),
+    PreUn(PreUnExpr<'src>),
+    PostUn(PostUnExpr<'src>),
 }
 
 impl<'src> Parsable<'src> for Expr<'src> {
@@ -266,6 +269,28 @@ pub struct BinExpr<'src> {
 #[derive(Debug)]
 pub enum BinOp {
     Plus,
+}
+
+#[derive(Debug)]
+pub struct PreUnExpr<'src> {
+    op: PreUnOp,
+    inner: Box<Expr<'src>>,
+}
+
+#[derive(Debug)]
+pub enum PreUnOp {
+    Neg,
+}
+
+#[derive(Debug)]
+pub struct PostUnExpr<'src> {
+    op: PostUnOp,
+    inner: Box<Expr<'src>>,
+}
+
+#[derive(Debug)]
+pub enum PostUnOp {
+    Exp,
 }
 
 #[derive(Debug)]
