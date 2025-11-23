@@ -1,0 +1,9 @@
+
+// str: fatptr
+fn println(src: &str) {
+    asm "mov x0, STDOUT_FD";
+    asm "mov x1, src.ptr()";
+    asm "mov x2, src.len()";
+    asm "mov x16, SYSCALL_WRITE";
+    asm "svc #0x80";
+}

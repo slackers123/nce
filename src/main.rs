@@ -2,7 +2,11 @@
 //! maybe making it safe to call runtime generated code?
 
 use core::panic;
-use std::{env, fs, iter::Peekable, marker::PhantomData};
+use std::{iter::Peekable, marker::PhantomData};
+
+pub mod bc;
+pub mod codegen;
+pub mod parser;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Span<'src> {
@@ -30,6 +34,7 @@ impl<'src> Token<'src> {
             },
         }
     }
+
     fn new(start: usize, end: usize, line: usize, ty: TokenType, src: &'src [char]) -> Self {
         Token {
             ty,
@@ -56,7 +61,7 @@ pub enum TokenType {
     Colon,
     SemiColon,
     Comma,
-    Plus,
+    SmallRArrow,
     StrLit,
     IntLit,
     FloatLit,
@@ -72,6 +77,16 @@ pub struct Tokenizer<'src> {
     idx: usize,
     line_cnt: usize,
     src: &'src [char],
+}
+
+impl<'src> Tokenizer<'src> {
+    pub fn new(src: &'src [char]) -> Self {
+        Self {
+            idx: 0,
+            line_cnt: 0,
+            src,
+        }
+    }
 }
 
 pub trait TokenIter<'src> {
@@ -115,7 +130,6 @@ impl<'src> Iterator for Tokenizer<'src> {
                 '{' => Some(TokenType::LBrace),
                 '}' => Some(TokenType::RBrace),
                 ':' => Some(TokenType::Colon),
-                '+' => Some(TokenType::Plus),
                 ';' => Some(TokenType::SemiColon),
                 _ => None,
             }
@@ -133,13 +147,27 @@ impl<'src> Iterator for Tokenizer<'src> {
 
                     *idx += 1;
 
-                    return Token::new(start, *idx - 1, *line_cnt, TokenType::Ident, src);
+                    return Token::new(start, *idx - 1, *line_cnt, TokenType::StrLit, src);
+                }
+
+                if src[*idx] == '-' && *idx < src.len() - 1 && src[*idx + 1] == '>' {
+                    *idx += 2;
+                    return Token::new(*idx - 1, *idx, *line_cnt, TokenType::SmallRArrow, src);
+                }
+
+                if src[*idx].is_numeric() {
+                    let start = *idx;
+                    while src[*idx].is_numeric() {
+                        *idx += 1;
+                    }
+                    return Token::new(start, *idx - 1, *line_cnt, TokenType::IntLit, src);
                 }
 
                 let start = *idx;
                 while src.len() > *idx && src[*idx].is_alphanumeric() {
                     *idx += 1;
                 }
+
                 let word: String = src.get(start..*idx).unwrap().iter().collect();
 
                 if let Some(keyword) = KEYWORDS.iter().position(|w| **w == word) {
@@ -152,7 +180,7 @@ impl<'src> Iterator for Tokenizer<'src> {
     }
 }
 
-pub trait Parsable<'src> {
+pub trait Parseable<'src> {
     fn parse(toks: &mut PToks<'src>) -> Self;
 }
 
@@ -161,7 +189,7 @@ pub struct Program<'src> {
     functions: Function<'src>,
 }
 
-impl<'src> Parsable<'src> for Program<'src> {
+impl<'src> Parseable<'src> for Program<'src> {
     fn parse(toks: &mut PToks<'src>) -> Self {
         Self {
             functions: Function::parse(toks),
@@ -177,7 +205,7 @@ pub struct Function<'src> {
     statements: Vec<Stmt<'src>>,
 }
 
-impl<'src> Parsable<'src> for Function<'src> {
+impl<'src> Parseable<'src> for Function<'src> {
     fn parse(toks: &mut PToks<'src>) -> Self {
         toks.get_next_tt(TokenType::Fn);
 
@@ -186,19 +214,32 @@ impl<'src> Parsable<'src> for Function<'src> {
         // TODO: fnction args
         toks.get_next_tt(TokenType::RParen);
 
-        let next = toks.next().unwrap();
+        let next = toks.peek().unwrap();
         let return_type = match next.ty {
-            TokenType::Colon => Some(Type::parse(toks)),
+            TokenType::SmallRArrow => {
+                toks.next();
+                Some(Type::parse(toks))
+            }
             TokenType::LBrace => None,
             _ => panic!("expected either Colon or LBrace but got {:?}", next.ty),
         };
 
-        // TODO: statements
+        toks.get_next_tt(TokenType::LBrace);
+
+        let mut statements = vec![];
+
+        while toks.peek().unwrap().ty != TokenType::RBrace {
+            statements.push(Stmt::parse(toks));
+
+            toks.get_next_tt(TokenType::SemiColon);
+        }
+
+        toks.next();
 
         Self {
             name,
             return_type,
-            statements: vec![],
+            statements,
         }
     }
 }
@@ -208,55 +249,75 @@ pub struct Type<'src> {
     name: &'src [char],
 }
 
-impl<'src> Parsable<'src> for Type<'src> {
+impl<'src> Parseable<'src> for Type<'src> {
     fn parse(toks: &mut PToks<'src>) -> Self {
         let tok = toks.next().unwrap();
+
         if tok.ty != TokenType::Ident {
             panic!("Expected type name");
         }
+
         Self { name: tok.span.val }
     }
 }
 
 #[derive(Debug)]
 pub enum Stmt<'src> {
-    Expr(ExprStmt<'src>),
-    Return(),
+    Expr(Expr<'src>),
+    Return(Expr<'src>),
     /// let
     Def(),
     If(),
     While(),
 }
 
-impl<'src> Parsable<'src> for Stmt<'src> {
+impl<'src> Parseable<'src> for Stmt<'src> {
     fn parse(toks: &mut PToks<'src>) -> Self {
-        todo!()
+        match toks.peek().unwrap().ty {
+            TokenType::Return => {
+                toks.next();
+                Self::Return(Expr::parse(toks))
+            }
+            TokenType::Let => Self::Def(),
+            _ => Self::Expr(Expr::parse(toks)),
+        }
     }
-}
-
-#[derive(Debug)]
-pub struct ExprStmt<'src> {
-    expr: Expr<'src>,
 }
 
 #[derive(Debug)]
 pub enum Expr<'src> {
     FnCall(FnCallExpr<'src>),
     Literal(LitExpr),
-    Bin(BinExpr<'src>),
-    PreUn(PreUnExpr<'src>),
-    PostUn(PostUnExpr<'src>),
 }
 
-impl<'src> Parsable<'src> for Expr<'src> {
+impl<'src> Parseable<'src> for Expr<'src> {
     fn parse(toks: &mut PToks<'src>) -> Self {
-        todo!()
+        match toks.peek().unwrap().ty {
+            TokenType::FloatLit | TokenType::IntLit | TokenType::StrLit => {
+                Self::Literal(LitExpr::parse(toks))
+            }
+            TokenType::Ident => Self::FnCall(FnCallExpr::parse(toks)),
+            ty => panic!("unexpected token: {ty:?}"),
+        }
     }
 }
 
 #[derive(Debug)]
 pub enum LitExpr {
     String(String),
+    Int(i64),
+}
+
+impl<'src> Parseable<'src> for LitExpr {
+    fn parse(toks: &mut PToks<'src>) -> Self {
+        let tok = toks.next().unwrap();
+        let str: String = tok.span.val.iter().collect();
+        match tok.ty {
+            TokenType::StrLit => Self::String(str),
+            TokenType::IntLit => Self::Int(str.parse().unwrap()),
+            tok => panic!("unexpected token: {tok:?}"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -296,29 +357,31 @@ pub enum PostUnOp {
 #[derive(Debug)]
 pub struct FnCallExpr<'src> {
     name: &'src [char],
-    args: Option<CommaSeperated<'src, Expr<'src>>>,
+    args: Option<CommaSeparated<'src, Expr<'src>>>,
 }
 
-impl<'src> Parsable<'src> for FnCallExpr<'src> {
+impl<'src> Parseable<'src> for FnCallExpr<'src> {
     fn parse(toks: &mut PToks<'src>) -> Self {
         let name = toks.get_next_tt(TokenType::Ident).span.val;
         toks.get_next_tt(TokenType::LParen);
         let args = match toks.peek().unwrap().ty {
             TokenType::RBrace => None,
-            _ => Some(CommaSeperated::parse(toks)),
+            _ => Some(CommaSeparated::parse(toks)),
         };
+
+        toks.get_next_tt(TokenType::RParen);
 
         FnCallExpr { name, args }
     }
 }
 
 #[derive(Debug)]
-pub struct CommaSeperated<'src, T: Parsable<'src>> {
+pub struct CommaSeparated<'src, T: Parseable<'src>> {
     vals: Vec<T>,
     _int: &'src PhantomData<()>,
 }
 
-impl<'src, T: Parsable<'src>> Parsable<'src> for CommaSeperated<'src, T> {
+impl<'src, T: Parseable<'src>> Parseable<'src> for CommaSeparated<'src, T> {
     fn parse(toks: &mut PToks<'src>) -> Self {
         let mut vals = vec![];
         loop {
@@ -329,7 +392,7 @@ impl<'src, T: Parsable<'src>> Parsable<'src> for CommaSeperated<'src, T> {
                 break;
             }
         }
-        CommaSeperated {
+        CommaSeparated {
             vals,
             _int: &PhantomData,
         }
@@ -337,18 +400,43 @@ impl<'src, T: Parsable<'src>> Parsable<'src> for CommaSeperated<'src, T> {
 }
 
 fn main() {
-    let path = env::args().nth(1).expect("you need to pass a file");
+    // let src = "fn main() -> isize {
+    //     return 0;
+    //     }"
+    // .chars()
+    // .collect::<Vec<_>>();
 
-    let src = fs::read_to_string(path)
-        .unwrap()
-        .chars()
-        .collect::<Vec<_>>();
+    // let mut toks = Tokenizer::new(&src).peekable();
 
-    let toks = Tokenizer {
-        src: &src,
-        idx: 0,
-        line_cnt: 0,
+    // let res = Function::parse(&mut toks);
+
+    // println!("{res:?}");
+
+    let mut output = String::new();
+
+    // codegen::gen_syscall(
+    //     &mut output,
+    //     Syscall::Write {
+    //         fildes: Operand::Immediate(1),
+    //         buf: Register::X1,
+    //         nbytes: Operand::Immediate(13),
+    //     },
+    // );
+
+    let fun = codegen::Function {
+        name: "main".into(),
+        args: vec![codegen::Var {
+            name: "argc".into(),
+            byte_size: 4,
+        }],
+        local_variables: vec![codegen::Var {
+            name: "a".into(),
+            byte_size: 8,
+        }],
+        local_consts: vec![codegen::Const::LiteralIsize(123)],
     };
 
-    println!("{:?}", Program::parse(&mut toks.peekable()));
+    codegen::gen_function(&mut output, &fun);
+
+    println!("{output}");
 }
