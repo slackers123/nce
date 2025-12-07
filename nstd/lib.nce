@@ -1,6 +1,6 @@
 
 // str: fatptr
-fn println(src: &str) {
+fn print(src: &str) {
     asm "mov x0, STDOUT_FD";
     asm "mov x1, src.ptr()";
     asm "mov x2, src.len()";
