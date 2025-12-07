@@ -242,17 +242,13 @@ pub fn gen_load_pair(out: &mut String, target1: Register, target2: Register, src
 //     gen_fn_epilogue(output, fun);
 // }
 
-// pub fn calc_stack_size(fun: &Function) -> usize {
-//     let int = (fun
-//         .local_variables
-//         .iter()
-//         .map(|v| v.byte_size)
-//         .sum::<usize>()
-//         + fun.args.iter().map(|v| v.byte_size).sum::<usize>())
-//         + 16;
-//     let rem = int % 16;
-//     if rem == 0 { int } else { int + (16 - rem) }
-// }
+pub fn calc_stack_size(ctx: &mid_level::Context) -> usize {
+    // FIXME: non 8-byte variables
+
+    let int = (ctx.locals.len() * 8) + 16;
+    let rem = int % 16;
+    if rem == 0 { int } else { int + (16 - rem) }
+}
 
 // pub fn calc_var_stack_offset(fun: &Function, index: usize) -> Indexed {
 //     let offset_bytes = fun
@@ -287,8 +283,7 @@ pub fn gen_fn_prologue(out: &mut String, ctx: &mid_level::Context) {
 
     gen_label(out, &ctx.name);
 
-    // FIXME: non 8-byte variables
-    let stack_size = ctx.locals.len() * 8 + 16;
+    let stack_size = calc_stack_size(ctx);
 
     gen_store_pair(
         out,
@@ -303,15 +298,18 @@ pub fn gen_fn_prologue(out: &mut String, ctx: &mid_level::Context) {
     for i in 0..ctx.arg_count {
         let src_reg = Register::from_usize(i);
 
-        gen_store(out, src_reg, get_local_indexed(ctx, &mid_level::Local(i)));
+        gen_store(
+            out,
+            src_reg,
+            get_local_indexed(ctx, &mid_level::Local(i + 1)),
+        );
     }
 }
 
 pub fn gen_fn_epilogue(out: &mut String, ctx: &mid_level::Context) {
     gen_label(out, &ctx.get_exit_name());
 
-    // FIXME: non 8-byte variables
-    let stack_size = ctx.locals.len() * 8 + 16;
+    let stack_size = calc_stack_size(ctx);
     gen_load_pair(
         out,
         Register::FP,
@@ -525,6 +523,12 @@ pub fn gen_bb(out: &mut String, ctx: &mid_level::Context, bb: &mid_level::BasicB
 pub fn gen_tac(out: &mut String, ctx: &mid_level::Context, tac: &mid_level::Tac) {
     gen_load_source(out, ctx, &tac.source, Register::X0);
 
+    // FIXME: This is a hacky solution for storing the return
+    // value.
+    if tac.target.0 == 0 {
+        return;
+    }
+
     gen_store_in_local(out, ctx, Register::X0, &tac.target);
 }
 
@@ -590,7 +594,7 @@ pub fn gen_load_local(
 pub fn get_local_indexed(ctx: &mid_level::Context, local: &mid_level::Local) -> Indexed {
     // FIXME: non 8-byte variables
 
-    let location = local.0 * 8 + 16;
+    let location = (local.0 - 1) * 8 + 16;
     Indexed::Offset(Register::SP, Some(Offset(location as i64)))
 }
 

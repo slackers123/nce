@@ -423,45 +423,6 @@ pub fn test() {
 
     let globals = vec![Ident("add"), Ident("gt")];
 
-    // let res = gen_fn_bbs(
-    //     globals,
-    //     Function {
-    //         name: "main".into(),
-    //         args: vec![Ident("a"), Ident("b")],
-    //         block: Block {
-    //             stmts: vec![
-    //                 Statement::VarDecl(Ident("c"), Some(Expr::Immediate(Immediate { val: 10 }))),
-    //                 Statement::VarDecl(Ident("d"), None),
-    //                 Statement::If(IfStatement {
-    //                     condition: Expr::FnCall(FnCallExpr {
-    //                         callable: Box::new(Expr::Global(Ident("gt"))),
-    //                         args: vec![Expr::Local(Ident("b")), Expr::Local(Ident("c"))],
-    //                     }),
-    //                     success: Block {
-    //                         stmts: vec![Statement::VarAssign(
-    //                             Ident("d"),
-    //                             Expr::FnCall(FnCallExpr {
-    //                                 callable: Box::new(Expr::Global(Ident("add"))),
-    //                                 args: vec![Expr::Local(Ident("c")), Expr::Local(Ident("b"))],
-    //                             }),
-    //                         )],
-    //                     },
-    //                     failure: Some(Block {
-    //                         stmts: vec![Statement::VarAssign(
-    //                             Ident("d"),
-    //                             Expr::FnCall(FnCallExpr {
-    //                                 callable: Box::new(Expr::Global(Ident("add"))),
-    //                                 args: vec![Expr::Local(Ident("c")), Expr::Local(Ident("a"))],
-    //                             }),
-    //                         )],
-    //                     }),
-    //                 }),
-    //                 Statement::Return(Some(Expr::Local(Ident("d")))),
-    //             ],
-    //         },
-    //     },
-    // );
-
     let res = gen_fn_bbs(
         globals,
         Function {
@@ -470,10 +431,32 @@ pub fn test() {
             block: Block {
                 stmts: vec![
                     Statement::VarDecl(Ident("c"), Some(Expr::Immediate(Immediate { val: 10 }))),
-                    Statement::Return(Some(Expr::FnCall(FnCallExpr {
-                        callable: Box::new(Expr::Global(Ident("main"))),
-                        args: vec![Expr::Local(Ident("c")), Expr::Local(Ident("a"))],
-                    }))),
+                    Statement::VarDecl(Ident("d"), None),
+                    Statement::If(IfStatement {
+                        condition: Expr::FnCall(FnCallExpr {
+                            callable: Box::new(Expr::Global(Ident("gt"))),
+                            args: vec![Expr::Local(Ident("b")), Expr::Local(Ident("c"))],
+                        }),
+                        success: Block {
+                            stmts: vec![Statement::VarAssign(
+                                Ident("d"),
+                                Expr::FnCall(FnCallExpr {
+                                    callable: Box::new(Expr::Global(Ident("add"))),
+                                    args: vec![Expr::Local(Ident("c")), Expr::Local(Ident("b"))],
+                                }),
+                            )],
+                        },
+                        failure: Some(Block {
+                            stmts: vec![Statement::VarAssign(
+                                Ident("d"),
+                                Expr::FnCall(FnCallExpr {
+                                    callable: Box::new(Expr::Global(Ident("add"))),
+                                    args: vec![Expr::Local(Ident("c")), Expr::Local(Ident("a"))],
+                                }),
+                            )],
+                        }),
+                    }),
+                    Statement::Return(Some(Expr::Local(Ident("d")))),
                 ],
             },
         },
