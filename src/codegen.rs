@@ -501,13 +501,22 @@ pub fn gen_rt(out: &mut String) {
 }
 
 pub fn gen_from_context(out: &mut String, ctx: &mid_level::Context) {
-    gen_fn_prologue(out, ctx);
+    if let Some(asm) = &ctx.assembly {
+        gen_label(out, &ctx.name);
 
-    for bb in &ctx.basic_blocks {
-        gen_bb(out, ctx, bb);
+        out.push_str(asm);
+        out.push('\n');
+
+        writeln!(out, "ret").unwrap();
+    } else {
+        gen_fn_prologue(out, ctx);
+
+        for bb in &ctx.basic_blocks {
+            gen_bb(out, ctx, bb);
+        }
+
+        gen_fn_epilogue(out, ctx);
     }
-
-    gen_fn_epilogue(out, ctx);
 }
 
 pub fn gen_bb(out: &mut String, ctx: &mid_level::Context, bb: &mid_level::BasicBlock) {

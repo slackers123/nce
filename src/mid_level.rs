@@ -8,9 +8,11 @@
 //! register 0 is the return register
 //! registers 1..=arg_count are the arguments. Locals are allocated indecies after this.
 
+use std::sync::LazyLock;
+
 use crate::codegen;
 
-const RETURN_ARG_IDENT: Ident = Ident("return_args");
+pub static RETURN_ARG_IDENT: LazyLock<Ident> = LazyLock::new(|| Ident(String::from("return_args")));
 const RETURN_ARG_LOCAL: Local = Local(0);
 
 #[derive(Debug, Clone)]
@@ -73,7 +75,7 @@ pub enum Terminator {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Ident(&'static str);
+pub struct Ident(pub String);
 
 #[derive(Debug, Clone)]
 pub struct Context {
@@ -82,13 +84,18 @@ pub struct Context {
     pub globals: Vec<Ident>,
     pub basic_blocks: Vec<BasicBlock>,
     pub arg_count: usize,
+    pub assembly: Option<String>,
     current_bb: usize,
     loop_info: Option<(usize, Vec<usize>)>,
 }
 
 impl Context {
     pub fn from_fn(globals: Vec<Ident>, fun: &Function) -> Self {
-        let mut locals = vec![Some(RETURN_ARG_IDENT)];
+        Self::from_asm_fn(globals, fun, None)
+    }
+
+    pub fn from_asm_fn(globals: Vec<Ident>, fun: &Function, assembly: Option<String>) -> Self {
+        let mut locals = vec![Some(RETURN_ARG_IDENT.clone())];
         let arg_count = fun.args.len();
         let mut args: Vec<_> = fun.args.iter().cloned().map(|a| Some(a)).collect();
         locals.append(&mut args);
@@ -101,6 +108,7 @@ impl Context {
             current_bb: 0,
             loop_info: None,
             arg_count,
+            assembly,
         }
     }
 
@@ -226,11 +234,17 @@ impl Context {
 }
 
 pub struct Function {
-    name: String,
-    args: Vec<Ident>,
-    block: Block,
+    pub name: String,
+    pub args: Vec<Ident>,
+    pub block: FunctionBlock,
 }
 
+pub enum FunctionBlock {
+    Regular(Block),
+    Assembly(AssemblyBlock),
+}
+
+#[derive(Debug, Clone)]
 pub enum Statement {
     Return(Option<Expr>),
     If(IfStatement),
@@ -241,12 +255,14 @@ pub enum Statement {
     Continue,
 }
 
+#[derive(Debug, Clone)]
 pub struct IfStatement {
-    condition: Expr,
-    success: Block,
-    failure: Option<Block>,
+    pub condition: Expr,
+    pub success: Block,
+    pub failure: Option<Block>,
 }
 
+#[derive(Debug, Clone)]
 pub enum Expr {
     Immediate(Immediate),
     FnCall(FnCallExpr),
@@ -254,25 +270,36 @@ pub enum Expr {
     Global(Ident),
 }
 
+#[derive(Debug, Clone)]
 pub struct FnCallExpr {
-    callable: Box<Expr>,
-    args: Vec<Expr>,
+    pub callable: Box<Expr>,
+    pub args: Vec<Expr>,
 }
 
+#[derive(Debug, Clone)]
 pub struct Block {
-    stmts: Vec<Statement>,
+    pub stmts: Vec<Statement>,
+}
+
+pub struct AssemblyBlock {
+    assembly: String,
 }
 
 pub fn gen_fn_bbs(globals: Vec<Ident>, fun: Function) -> Context {
-    let mut ctx = Context::from_fn(globals, &fun);
+    match &fun.block {
+        FunctionBlock::Assembly(a) => Context::from_asm_fn(globals, &fun, Some(a.assembly.clone())),
+        FunctionBlock::Regular(block) => {
+            let mut ctx = Context::from_fn(globals, &fun);
 
-    ctx.start_new_bb();
+            ctx.start_new_bb();
 
-    gen_block_bbs(&mut ctx, fun.block);
+            gen_block_bbs(&mut ctx, block.clone());
 
-    ctx.finish_fn();
+            ctx.finish_fn();
 
-    ctx
+            ctx
+        }
+    }
 }
 
 pub fn gen_block_bbs(ctx: &mut Context, block: Block) {
@@ -421,47 +448,57 @@ pub fn test() {
     // 3 => c
     // 4 => d
 
-    let globals = vec![Ident("add"), Ident("gt")];
+    let globals = vec![Ident("add".into()), Ident("gt".into())];
+
+    // let res = gen_fn_bbs(
+    //     globals,
+    //     Function {
+    //         name: "main".into(),
+    //         args: vec![Ident("a"), Ident("b")],
+    //         block: FunctionBlock::Regular(Block {
+    //             stmts: vec![
+    //                 Statement::VarDecl(Ident("c"), Some(Expr::Immediate(Immediate { val: 10 }))),
+    //                 Statement::VarDecl(Ident("d"), None),
+    //                 Statement::If(IfStatement {
+    //                     condition: Expr::FnCall(FnCallExpr {
+    //                         callable: Box::new(Expr::Global(Ident("gt"))),
+    //                         args: vec![Expr::Local(Ident("b")), Expr::Local(Ident("c"))],
+    //                     }),
+    //                     success: Block {
+    //                         stmts: vec![Statement::VarAssign(
+    //                             Ident("d"),
+    //                             Expr::FnCall(FnCallExpr {
+    //                                 callable: Box::new(Expr::Global(Ident("add"))),
+    //                                 args: vec![Expr::Local(Ident("c")), Expr::Local(Ident("b"))],
+    //                             }),
+    //                         )],
+    //                     },
+    //                     failure: Some(Block {
+    //                         stmts: vec![Statement::VarAssign(
+    //                             Ident("d"),
+    //                             Expr::FnCall(FnCallExpr {
+    //                                 callable: Box::new(Expr::Global(Ident("add"))),
+    //                                 args: vec![Expr::Local(Ident("c")), Expr::Local(Ident("a"))],
+    //                             }),
+    //                         )],
+    //                     }),
+    //                 }),
+    //                 Statement::Return(Some(Expr::Local(Ident("d")))),
+    //             ],
+    //         }),
+    //     },
+    // );
 
     let res = gen_fn_bbs(
         globals,
         Function {
             name: "main".into(),
-            args: vec![Ident("a"), Ident("b")],
-            block: Block {
-                stmts: vec![
-                    Statement::VarDecl(Ident("c"), Some(Expr::Immediate(Immediate { val: 10 }))),
-                    Statement::VarDecl(Ident("d"), None),
-                    Statement::If(IfStatement {
-                        condition: Expr::FnCall(FnCallExpr {
-                            callable: Box::new(Expr::Global(Ident("gt"))),
-                            args: vec![Expr::Local(Ident("b")), Expr::Local(Ident("c"))],
-                        }),
-                        success: Block {
-                            stmts: vec![Statement::VarAssign(
-                                Ident("d"),
-                                Expr::FnCall(FnCallExpr {
-                                    callable: Box::new(Expr::Global(Ident("add"))),
-                                    args: vec![Expr::Local(Ident("c")), Expr::Local(Ident("b"))],
-                                }),
-                            )],
-                        },
-                        failure: Some(Block {
-                            stmts: vec![Statement::VarAssign(
-                                Ident("d"),
-                                Expr::FnCall(FnCallExpr {
-                                    callable: Box::new(Expr::Global(Ident("add"))),
-                                    args: vec![Expr::Local(Ident("c")), Expr::Local(Ident("a"))],
-                                }),
-                            )],
-                        }),
-                    }),
-                    Statement::Return(Some(Expr::Local(Ident("d")))),
-                ],
-            },
+            args: vec![Ident("a".into()), Ident("b".into())],
+            block: FunctionBlock::Assembly(AssemblyBlock {
+                assembly: "mov x0, x1".into(),
+            }),
         },
     );
-
     let mut out = String::new();
 
     codegen::gen_from_context(&mut out, &res);

@@ -4,3 +4,4 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+qparse = { git = "https://github.com/slackers123/qparse.git", rev = "3302d66"}

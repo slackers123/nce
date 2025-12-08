@@ -14,43 +14,96 @@ greater_than:
     mov x0, #1
     ret
 
+
+eq:
+    cmp x0, x1
+    beq equal
+    mov x0, #0
+    ret
+equal:
+    mov x0, #1
+    ret
+
+
 add:
     add x0, x0, x1
     ret
 
+sub:
+    sub x0, x0, x1
+    ret
+
 main:
+    stp fp, lr, [sp,  #-32]!
+    mov fp, sp
+main_bb0:
+    mov x0, #13
+    bl fib
+    #mov x0, x0
+    str x0, [sp,  #16]
+    ldr x0, [sp,  #16]
+
+    #mov x0, x0
+    b main_exit
+main_exit:
+    ldp fp, lr, [sp], #32
+    ret
+
+fib:
     stp fp, lr, [sp,  #-64]!
     mov fp, sp
     str x0, [sp,  #16]
-    str x1, [sp,  #24]
-main_bb0:
-    mov x0, #10
-    str x0, [sp,  #32]
-    ldr x0, [sp,  #24]
-    ldr x1, [sp,  #32]
-    bl gt
+fib_bb0:
+    ldr x0, [sp,  #16]
+    mov x1, #0
+    bl eq
     #mov x0, x0
     cmp x0, xzr
-    bne main_bb1
-    b main_bb2
-main_bb1:
-    ldr x0, [sp,  #32]
-    ldr x1, [sp,  #24]
-    bl add
+    bne fib_bb1
+    b fib_bb3
+fib_bb1:
+    mov x0, #0
+    b fib_exit
+fib_bb2:
+    b fib_bb3
+fib_bb3:
+    ldr x0, [sp,  #16]
+    mov x1, #1
+    bl eq
+    #mov x0, x0
+    cmp x0, xzr
+    bne fib_bb4
+    b fib_bb6
+fib_bb4:
+    mov x0, #1
+    b fib_exit
+fib_bb5:
+    b fib_bb6
+fib_bb6:
+    ldr x0, [sp,  #16]
+    mov x1, #1
+    bl sub
+    #mov x0, x0
+    str x0, [sp,  #24]
+    ldr x0, [sp,  #24]
+    bl fib
+    #mov x0, x0
+    str x0, [sp,  #32]
+    ldr x0, [sp,  #16]
+    mov x1, #2
+    bl sub
     #mov x0, x0
     str x0, [sp,  #40]
-    b main_bb3
-main_bb2:
-    ldr x0, [sp,  #32]
-    ldr x1, [sp,  #16]
-    bl add
-    #mov x0, x0
-    str x0, [sp,  #40]
-    b main_bb3
-main_bb3:
     ldr x0, [sp,  #40]
-    b main_exit
-main_exit:
+    bl fib
+    #mov x0, x0
+    str x0, [sp,  #48]
+    ldr x0, [sp,  #32]
+    ldr x1, [sp,  #48]
+    bl add
+    #mov x0, x0
+    b fib_exit
+fib_exit:
     ldp fp, lr, [sp], #64
     ret
 

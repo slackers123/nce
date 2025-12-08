@@ -5,3 +5,11 @@ version = 4
 [[package]]
 name = "nce"
 version = "0.1.0"
+dependencies = [
+ "qparse",
+]
+
+[[package]]
+name = "qparse"
+version = "0.1.0"
+source = "git+https://github.com/slackers123/qparse.git?rev=3302d66#3302d668f53f1c53513c220cf3e25b11b36a543f"
