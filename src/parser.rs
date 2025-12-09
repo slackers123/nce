@@ -1,5 +1,5 @@
 use qparse::{
-    ParseRes, char, map_err,
+    ParseError, ParseRes, char, map_err,
     multi::{many_with_separator, many_with_separator_lax, many0},
     parser::Parser,
     sequence::{delimited, preceded, trailed},
@@ -13,105 +13,31 @@ use std::{collections::HashMap, fmt::Display, str::FromStr};
 use crate::{
     codegen,
     mid_level::{self, RETURN_ARG_IDENT},
+    parser,
 };
-
-#[derive(Debug, Default)]
-pub struct VM {
-    global_variables: HashMap<Ident, VMVal>,
-    variables: HashMap<Ident, VMVal>,
-}
-
-impl VM {
-    pub fn new(global_variables: HashMap<Ident, VMVal>) -> Self {
-        Self {
-            global_variables,
-            variables: HashMap::new(),
-        }
-    }
-
-    pub fn from_existing(existing: &VM, variables: HashMap<Ident, VMVal>) -> Self {
-        Self {
-            global_variables: existing.global_variables.clone(),
-            variables,
-        }
-    }
-
-    pub fn call(&mut self, name: &str, args: Vec<VMVal>) -> Option<VMVal> {
-        let fun = self
-            .get_var(&Ident(name.to_string()))
-            .unwrap()
-            .clone()
-            .as_function();
-
-        let mut sub = VM::from_existing(
-            self,
-            fun.args
-                .iter()
-                .zip(args.into_iter())
-                .map(|(name, val)| (name.ident.clone(), val))
-                .collect(),
-        );
-
-        fun.eval(&mut sub)
-    }
-
-    pub fn get_var(&self, name: &Ident) -> Option<&VMVal> {
-        self.variables
-            .get(name)
-            .or_else(|| self.global_variables.get(name))
-    }
-
-    pub fn get_var_mut(&mut self, name: &Ident) -> Option<&mut VMVal> {
-        self.variables
-            .get_mut(name)
-            .or_else(|| self.global_variables.get_mut(name))
-    }
-}
 
 #[derive(Debug)]
 pub struct Module {
-    functions: Vec<Function>,
+    pub functions: Vec<Function>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Function {
-    name: Ident,
-    args: Vec<TypedIdent>,
-    ret_ty: Option<Type>,
-    block: Block,
-}
-
-impl Function {
-    pub fn eval(&self, vm: &mut VM) -> Option<VMVal> {
-        self.block.eval(vm).0
-    }
+    pub name: Ident,
+    pub args: Vec<TypedIdent>,
+    pub ret_ty: Option<Type>,
+    pub block: Block,
 }
 
 #[derive(Debug, Clone)]
 pub struct TypedIdent {
-    ident: Ident,
-    ty: Type,
+    pub ident: Ident,
+    pub ty: Type,
 }
 
 #[derive(Debug, Clone)]
 pub struct Block {
-    statements: Vec<Statement>,
-}
-
-impl Block {
-    pub fn eval(&self, vm: &mut VM) -> (Option<VMVal>, bool) {
-        let mut last_value = None;
-        for statement in &self.statements {
-            let (val, return_early) = statement.eval(vm);
-            if return_early {
-                return (val, true);
-            }
-
-            last_value = val;
-        }
-
-        (last_value, false)
-    }
+    pub stmts: Vec<Statement>,
 }
 
 #[derive(Debug, Clone)]
@@ -122,131 +48,47 @@ pub enum Statement {
     Return(RawReturn),
     Def(RawDef),
     Assign(RawAssign),
-    Expression(Expr),
-}
-
-impl Statement {
-    pub fn eval(&self, vm: &mut VM) -> (Option<VMVal>, bool) {
-        match self {
-            Self::Expression(e) => e.eval(vm),
-            Self::If(raw_if) => raw_if.eval(vm),
-            Self::Def(raw_def) => raw_def.eval(vm),
-            Self::Assign(raw_assign) => raw_assign.eval(vm),
-            Self::While(raw_while) => raw_while.eval(vm),
-            Self::Return(raw_return) => (raw_return.to_return.eval(vm).0, true),
-            Self::Block(block) => block.eval(vm),
-        }
-    }
+    Expression(Expr, bool),
+    Break,
+    Continue,
 }
 
 #[derive(Debug, Clone)]
 pub struct RawIf {
-    condition: Expr,
-    then_block: Block,
-    else_ifs: Vec<(Expr, Block)>,
-    else_block: Option<Block>,
-}
-
-impl RawIf {
-    pub fn eval(&self, vm: &mut VM) -> (Option<VMVal>, bool) {
-        if {
-            let cond_res = self.condition.eval(vm);
-            if cond_res.1 {
-                return cond_res;
-            }
-            cond_res.0.unwrap().as_bool()
-        } {
-            return self.then_block.eval(vm);
-        }
-
-        for else_if in &self.else_ifs {
-            if {
-                let cond_res = else_if.0.eval(vm);
-                if cond_res.1 {
-                    return cond_res;
-                }
-                cond_res.0.unwrap().as_bool()
-            } {
-                return else_if.1.eval(vm);
-            }
-        }
-
-        if let Some(else_block) = &self.else_block {
-            return else_block.eval(vm);
-        }
-
-        return (None, false);
-    }
+    pub condition: Expr,
+    pub then_block: Block,
+    pub else_ifs: Vec<(Expr, Block)>,
+    pub else_block: Option<Block>,
 }
 
 #[derive(Debug, Clone)]
 pub struct RawWhile {
-    condition: Expr,
-    while_block: Block,
-}
-
-impl RawWhile {
-    pub fn eval(&self, vm: &mut VM) -> (Option<VMVal>, bool) {
-        while {
-            let cond_res = self.condition.eval(vm);
-            if cond_res.1 {
-                return cond_res;
-            }
-            cond_res.0.unwrap().as_bool()
-        } {
-            self.while_block.eval(vm);
-        }
-
-        (None, false)
-    }
+    pub condition: Expr,
+    pub while_block: Block,
 }
 
 #[derive(Debug, Clone)]
 pub struct RawReturn {
-    to_return: Expr,
+    pub to_return: Expr,
 }
 
 #[derive(Debug, Clone)]
 pub struct RawDef {
-    new_var: Ident,
-    value: Expr,
-}
-
-impl RawDef {
-    pub fn eval(&self, vm: &mut VM) -> (Option<VMVal>, bool) {
-        let new = self.value.eval(vm);
-        if new.1 {
-            return new;
-        }
-        vm.variables.insert(self.new_var.clone(), new.0.unwrap());
-
-        (None, false)
-    }
+    pub new_var: Ident,
+    pub value: Expr,
 }
 
 #[derive(Debug, Clone)]
 pub struct RawAssign {
-    target: Ident,
-    value: Expr,
-}
-
-impl RawAssign {
-    pub fn eval(&self, vm: &mut VM) -> (Option<VMVal>, bool) {
-        let val_res = self.value.eval(vm);
-        if val_res.1 {
-            return val_res;
-        }
-        *vm.get_var_mut(&self.target).unwrap() = val_res.0.unwrap();
-
-        (None, false)
-    }
+    pub target: Ident,
+    pub value: Expr,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct Ident(String);
+pub struct Ident(pub String);
 
 #[derive(Debug, Clone)]
-pub struct Type(String);
+pub struct Type(pub String);
 
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -256,9 +98,9 @@ pub enum Expr {
 
 #[derive(Debug, Clone)]
 pub struct BinExpr {
-    lhs: Box<Expr>,
-    rhs: Box<Expr>,
-    op: BinOp,
+    pub lhs: Box<Expr>,
+    pub rhs: Box<Expr>,
+    pub op: BinOp,
 }
 
 #[derive(Debug, Clone)]
@@ -276,124 +118,6 @@ pub enum BinOp {
     Exp,
 }
 
-impl Expr {
-    pub fn eval(&self, vm: &mut VM) -> (Option<VMVal>, bool) {
-        match self {
-            Self::EVal(v) => v.eval(vm),
-            Self::EBin(BinExpr { lhs, rhs, op }) => {
-                let lhs = lhs.eval(vm);
-                if lhs.1 {
-                    return (lhs.0, true);
-                }
-                let rhs = rhs.eval(vm);
-                if rhs.1 {
-                    return (rhs.0, true);
-                }
-
-                (
-                    Some(match op {
-                        BinOp::Eq => VMVal::Boolean(lhs.0.unwrap() == rhs.0.unwrap()),
-                        BinOp::Neq => VMVal::Boolean(lhs.0.unwrap() != rhs.0.unwrap()),
-                        BinOp::Gt => {
-                            VMVal::Boolean(lhs.0.unwrap().as_num() > rhs.0.unwrap().as_num())
-                        }
-                        BinOp::Lt => {
-                            VMVal::Boolean(lhs.0.unwrap().as_num() < rhs.0.unwrap().as_num())
-                        }
-                        BinOp::Gte => {
-                            VMVal::Boolean(lhs.0.unwrap().as_num() >= rhs.0.unwrap().as_num())
-                        }
-                        BinOp::Lte => {
-                            VMVal::Boolean(lhs.0.unwrap().as_num() <= rhs.0.unwrap().as_num())
-                        }
-                        BinOp::Add => {
-                            VMVal::Number(lhs.0.unwrap().as_num() + rhs.0.unwrap().as_num())
-                        }
-                        BinOp::Sub => {
-                            VMVal::Number(lhs.0.unwrap().as_num() - rhs.0.unwrap().as_num())
-                        }
-                        BinOp::Mul => {
-                            VMVal::Number(lhs.0.unwrap().as_num() * rhs.0.unwrap().as_num())
-                        }
-                        BinOp::Div => {
-                            VMVal::Number(lhs.0.unwrap().as_num() / rhs.0.unwrap().as_num())
-                        }
-                        BinOp::Exp => {
-                            VMVal::Number(lhs.0.unwrap().as_num().powf(rhs.0.unwrap().as_num()))
-                        }
-                    }),
-                    false,
-                )
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum VMVal {
-    String(String),
-    Number(f64),
-    Boolean(bool),
-    Function(Function),
-}
-
-impl PartialEq for VMVal {
-    fn eq(&self, other: &Self) -> bool {
-        match self {
-            Self::String(s1) => match other {
-                Self::String(s2) => s1 == s2,
-                _ => false,
-            },
-            Self::Number(n1) => match other {
-                Self::Number(n2) => n1 == n2,
-                _ => false,
-            },
-            Self::Boolean(b1) => match other {
-                Self::Boolean(b2) => b1 == b2,
-                _ => false,
-            },
-            Self::Function(f1) => match other {
-                Self::Function(f2) => f1.name == f2.name,
-                _ => false,
-            },
-        }
-    }
-}
-
-impl Display for VMVal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Number(n) => write!(f, "{n}"),
-            Self::String(s) => write!(f, "{s}"),
-            Self::Boolean(b) => write!(f, "{b}"),
-            Self::Function(fun) => write!(f, "fn {}", fun.name.0),
-        }
-    }
-}
-
-impl VMVal {
-    pub fn as_num(self) -> f64 {
-        match self {
-            Self::Number(n) => n,
-            _ => panic!("expected number"),
-        }
-    }
-
-    pub fn as_bool(self) -> bool {
-        match self {
-            Self::Boolean(b) => b,
-            _ => panic!("expected boolean"),
-        }
-    }
-
-    pub fn as_function(self) -> Function {
-        match self {
-            Self::Function(f) => f,
-            _ => panic!("expected boolean"),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum Value {
     Block(Block),
@@ -403,43 +127,10 @@ pub enum Value {
     Literal(Literal),
 }
 
-impl Value {
-    pub fn eval(&self, vm: &mut VM) -> (Option<VMVal>, bool) {
-        match self {
-            Self::FnCall(f) => f.eval(vm),
-            Self::Literal(l) => (l.eval(vm), false),
-            Self::If(v) => v.eval(vm),
-            Self::Block(v) => v.eval(vm),
-            Self::Ident(i) => (Some(vm.get_var(i).unwrap().clone()), false),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct FnCall {
-    name: Ident,
-    args: Vec<Expr>,
-}
-
-impl FnCall {
-    pub fn eval(&self, vm: &mut VM) -> (Option<VMVal>, bool) {
-        if self.name.0 == "println" {
-            println!("{}", self.args[0].eval(vm).0.unwrap());
-            return (None, false);
-        }
-
-        let mut args = vec![];
-        for arg in &self.args {
-            let a_res = arg.eval(vm);
-            if a_res.1 {
-                return a_res;
-            }
-
-            args.push(a_res.0.unwrap());
-        }
-
-        (vm.call(&self.name.0, args), false)
-    }
+    pub name: Ident,
+    pub args: Vec<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -448,16 +139,7 @@ pub enum Literal {
     Number(f64),
 }
 
-impl Literal {
-    pub fn eval(&self, _vm: &mut VM) -> Option<VMVal> {
-        Some(match self {
-            Self::Number(n) => VMVal::Number(*n),
-            Self::String(s) => VMVal::String(s.clone()),
-        })
-    }
-}
-
-fn parse_module(input: &str) -> ParseRes<&str, Module> {
+pub fn parse_module(input: &str) -> ParseRes<&str, Module> {
     let (input, functions) =
         whitespace_wrapped(many_with_separator(parse_function, whitespace)).parse(input)?;
 
@@ -502,7 +184,7 @@ fn parse_block(input: &str) -> ParseRes<&str, Block> {
     )
     .parse(input)?;
 
-    Ok((input, Block { statements }))
+    Ok((input, Block { stmts: statements }))
 }
 
 fn parse_statement(input: &str) -> ParseRes<&str, Statement> {
@@ -634,9 +316,14 @@ fn parse_assign_stmt(input: &str) -> ParseRes<&str, Statement> {
 }
 
 fn parse_expr_stmt(input: &str) -> ParseRes<&str, Statement> {
-    let (input, expr) = trailed(parse_basic_expr, tag(';')).parse(input)?;
+    let (input, expr) = parse_basic_expr.parse(input)?;
 
-    Ok((input, Statement::Expression(expr)))
+    let (input, had_trailing_semicolon) = match tag(';').parse(input) {
+        Ok((i, _)) => (i, true),
+        Err(e) => (e.input, false),
+    };
+
+    Ok((input, Statement::Expression(expr, had_trailing_semicolon)))
 }
 
 fn parse_typed_ident(input: &str) -> ParseRes<&str, TypedIdent> {
@@ -708,10 +395,10 @@ fn parse_cmp(input: &str) -> ParseRes<&str, Expr> {
         whitespace_wrapped(use_first([
             char("=="),
             char("!="),
-            char(">"),
-            char("<"),
             char(">="),
             char("<="),
+            char(">"),
+            char("<"),
         ])),
         parse_cmp,
     ))
@@ -787,162 +474,152 @@ fn parse_literal_value(input: &str) -> ParseRes<&str, Value> {
 pub fn test() {
     let module = parse_module(
         r#"
-    fn main() {
-        println(fib(22));
-    }
-
-    fn fib(n: num) -> num {
-        if n == 0 {
-            return 0;
-        }
-
-        if n == 1 {
-            return 1;
-        }
-
-        return fib(n - 1) + fib(n - 2);
-    }
-    "#,
+    fn main() -> i64 {
+        let a = 100 + 100;
+        return a + 100;
+    }"#,
     )
     .unwrap();
 
     let mut globals = vec![
-        mid_level::Ident("println".into()),
-        mid_level::Ident("add".into()),
-        mid_level::Ident("sub".into()),
-        mid_level::Ident("eq".into()),
+        parser::Ident("println".into()),
+        parser::Ident("add".into()),
+        parser::Ident("sub".into()),
+        parser::Ident("eq".into()),
     ];
 
     for fun in &module.1.functions {
-        globals.push(ident_to_mid_level(fun.name.clone()));
+        // globals.push(ident_to_mid_level(fun.name.clone()));
     }
 
     for fun in module.1.functions {
-        let fun = fn_to_mid_level(fun);
+        // let fun = fn_to_mid_level(fun);
 
-        let ctx = mid_level::gen_fn_bbs(globals.clone(), fun);
+        // let ctx = mid_level::gen_fn_bbs(globals.clone(), fun);
 
-        let mut out = String::new();
-        codegen::gen_from_context(&mut out, &ctx);
+        // let mut out = String::new();
+        // codegen::gen_from_context(&mut out, &ctx);
 
-        println!("{out}");
+        // println!("{out}");
     }
 }
 
-pub fn fn_to_mid_level(fun: Function) -> mid_level::Function {
-    mid_level::Function {
-        name: fun.name.0,
-        args: fun
-            .args
-            .into_iter()
-            .map(|a| ident_to_mid_level(a.ident))
-            .collect(),
-        block: mid_level::FunctionBlock::Regular(block_to_mid_level(fun.block)),
-    }
-}
+// pub fn fn_to_mid_level(fun: Function) -> mid_level::Function {
+//     mid_level::Function {
+//         name: fun.name.0,
+//         args: fun
+//             .args
+//             .into_iter()
+//             .map(|a| ident_to_mid_level(a.ident))
+//             .collect(),
+//         block: mid_level::FunctionBlock::Regular(block_to_mid_level(fun.block)),
+//     }
+// }
 
-pub fn ident_to_mid_level(ident: Ident) -> mid_level::Ident {
-    mid_level::Ident(ident.0)
-}
+// pub fn ident_to_mid_level(ident: Ident) -> mid_level::Ident {
+//     mid_level::Ident(ident.0)
+// }
 
-pub fn stmt_to_mid_level(stmt: Statement) -> Vec<mid_level::Statement> {
-    match stmt {
-        Statement::Assign(RawAssign { target, value }) => {
-            vec![mid_level::Statement::VarAssign(
-                ident_to_mid_level(target),
-                expr_to_mid_level(value),
-            )]
-        }
-        Statement::Block(b) => b
-            .statements
-            .into_iter()
-            .flat_map(stmt_to_mid_level)
-            .collect(),
-        Statement::Def(RawDef { new_var, value }) => vec![mid_level::Statement::VarDecl(
-            ident_to_mid_level(new_var),
-            Some(expr_to_mid_level(value)),
-        )],
-        Statement::Expression(e) => {
-            // FIXME: This is a hacky way of returning the last expression
-            vec![mid_level::Statement::VarAssign(
-                RETURN_ARG_IDENT.clone(),
-                expr_to_mid_level(e),
-            )]
-        }
-        Statement::If(RawIf {
-            condition,
-            then_block,
-            else_ifs,
-            else_block,
-        }) => {
-            if !else_ifs.is_empty() {
-                todo!()
-            }
+// pub fn stmt_to_mid_level(stmt: Statement) -> Vec<mid_level::Statement> {
+//     match stmt {
+//         Statement::Assign(RawAssign { target, value }) => {
+//             vec![mid_level::Statement::VarAssign(
+//                 ident_to_mid_level(target),
+//                 expr_to_mid_level(value),
+//             )]
+//         }
+//         Statement::Block(b) => b
+//             .statements
+//             .into_iter()
+//             .flat_map(stmt_to_mid_level)
+//             .collect(),
+//         Statement::Def(RawDef { new_var, value }) => vec![mid_level::Statement::VarDecl(
+//             ident_to_mid_level(new_var),
+//             Some(expr_to_mid_level(value)),
+//         )],
+//         Statement::Expression(e) => {
+//             // FIXME: This is a hacky way of returning the last expression
+//             vec![mid_level::Statement::VarAssign(
+//                 RETURN_ARG_IDENT.clone(),
+//                 expr_to_mid_level(e),
+//             )]
+//         }
+//         Statement::If(RawIf {
+//             condition,
+//             then_block,
+//             else_ifs,
+//             else_block,
+//         }) => {
+//             if !else_ifs.is_empty() {
+//                 todo!()
+//             }
 
-            vec![mid_level::Statement::If(mid_level::IfStatement {
-                condition: expr_to_mid_level(condition),
-                success: block_to_mid_level(then_block),
-                failure: else_block.map(|b| block_to_mid_level(b)),
-            })]
-        }
-        Statement::Return(RawReturn { to_return }) => {
-            vec![mid_level::Statement::Return(Some(expr_to_mid_level(
-                to_return,
-            )))]
-        }
-        Statement::While(RawWhile {
-            condition,
-            while_block,
-        }) => {
-            let mut stmts = vec![mid_level::Statement::If(mid_level::IfStatement {
-                condition: expr_to_mid_level(condition),
-                success: mid_level::Block { stmts: vec![] },
-                failure: Some(mid_level::Block {
-                    stmts: vec![mid_level::Statement::Break],
-                }),
-            })];
-            stmts.append(&mut block_to_mid_level(while_block).stmts);
+//             vec![mid_level::Statement::If(mid_level::IfStatement {
+//                 condition: expr_to_mid_level(condition),
+//                 success: block_to_mid_level(then_block),
+//                 failure: else_block.map(|b| block_to_mid_level(b)),
+//             })]
+//         }
+//         Statement::Return(RawReturn { to_return }) => {
+//             vec![mid_level::Statement::Return(Some(expr_to_mid_level(
+//                 to_return,
+//             )))]
+//         }
+//         Statement::While(RawWhile {
+//             condition,
+//             while_block,
+//         }) => {
+//             let mut stmts = vec![mid_level::Statement::If(mid_level::IfStatement {
+//                 condition: expr_to_mid_level(condition),
+//                 success: mid_level::Block { stmts: vec![] },
+//                 failure: Some(mid_level::Block {
+//                     stmts: vec![mid_level::Statement::Break],
+//                 }),
+//             })];
+//             stmts.append(&mut block_to_mid_level(while_block).stmts);
 
-            vec![mid_level::Statement::Loop(mid_level::Block { stmts })]
-        }
-    }
-}
+//             vec![mid_level::Statement::Loop(mid_level::Block { stmts })]
+//         }
+//     }
+// }
 
-pub fn expr_to_mid_level(expr: Expr) -> mid_level::Expr {
-    match expr {
-        Expr::EBin(BinExpr { lhs, rhs, op }) => {
-            let op = match op {
-                BinOp::Add => "add",
-                BinOp::Eq => "eq",
-                BinOp::Sub => "sub",
-                _ => todo!("{op:?}"),
-            };
-            mid_level::Expr::FnCall(mid_level::FnCallExpr {
-                callable: Box::new(mid_level::Expr::Global(mid_level::Ident(op.into()))),
-                args: vec![expr_to_mid_level(*lhs), expr_to_mid_level(*rhs)],
-            })
-        }
+// pub fn expr_to_mid_level(expr: Expr) -> mid_level::Expr {
+//     match expr {
+//         Expr::EBin(BinExpr { lhs, rhs, op }) => {
+//             let op = match op {
+//                 BinOp::Add => "add",
+//                 BinOp::Eq => "eq",
+//                 BinOp::Lt => "lt",
+//                 BinOp::Lte => "lte",
+//                 BinOp::Sub => "sub",
+//                 _ => todo!("{op:?}"),
+//             };
+//             mid_level::Expr::FnCall(mid_level::FnCallExpr {
+//                 callable: Box::new(mid_level::Expr::Global(mid_level::Ident(op.into()))),
+//                 args: vec![expr_to_mid_level(*lhs), expr_to_mid_level(*rhs)],
+//             })
+//         }
 
-        Expr::EVal(v) => match *v {
-            Value::FnCall(f) => mid_level::Expr::FnCall(mid_level::FnCallExpr {
-                callable: Box::new(mid_level::Expr::Global(ident_to_mid_level(f.name))),
-                args: f.args.into_iter().map(expr_to_mid_level).collect(),
-            }),
-            Value::Ident(i) => mid_level::Expr::Local(ident_to_mid_level(i)),
-            Value::Literal(Literal::Number(n)) => {
-                mid_level::Expr::Immediate(mid_level::Immediate { val: n as u64 })
-            }
-            _ => todo!(),
-        },
-    }
-}
+//         Expr::EVal(v) => match *v {
+//             Value::FnCall(f) => mid_level::Expr::FnCall(mid_level::FnCallExpr {
+//                 callable: Box::new(mid_level::Expr::Global(ident_to_mid_level(f.name))),
+//                 args: f.args.into_iter().map(expr_to_mid_level).collect(),
+//             }),
+//             Value::Ident(i) => mid_level::Expr::Local(ident_to_mid_level(i)),
+//             Value::Literal(Literal::Number(n)) => {
+//                 mid_level::Expr::Immediate(mid_level::Immediate { val: n as u64 })
+//             }
+//             _ => todo!(),
+//         },
+//     }
+// }
 
-pub fn block_to_mid_level(b: Block) -> mid_level::Block {
-    mid_level::Block {
-        stmts: b
-            .statements
-            .into_iter()
-            .flat_map(stmt_to_mid_level)
-            .collect(),
-    }
-}
+// pub fn block_to_mid_level(b: Block) -> mid_level::Block {
+//     mid_level::Block {
+//         stmts: b
+//             .statements
+//             .into_iter()
+//             .flat_map(stmt_to_mid_level)
+//             .collect(),
+//     }
+// }

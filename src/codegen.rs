@@ -651,28 +651,3 @@ pub fn gen_load_arg(
         Arg::Immediate(imm) => gen_move(out, target, Immediate(imm.val)),
     }
 }
-
-// print(10 + 10, 5)
-//
-// print(add_i64_i64(10, 10), 5)
-//
-// const1 = 10;
-// const2 = 10;
-// const3 = 5;
-//
-// let add1 = const1;
-// let add2 = const2;
-// let print1 = add(add1, add2);
-// let print2 = const3;
-// print(print1)
-//
-// ldr x0, const1
-// str x0, add1
-// ldr x0, const2
-// str x0, add2
-// ldr x0, add1
-// ldr x1, add2
-// bl add
-// str x0, print1
-// ldr x0, print1
-// bl print

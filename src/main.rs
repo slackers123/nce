@@ -1,6 +1,8 @@
 //! A toy language to try my hands with runtime code generation and
 //! maybe making it safe to call runtime generated code?
 
+use std::fs;
+
 pub mod bc;
 pub mod codegen;
 pub mod mid_level;
@@ -9,67 +11,73 @@ pub mod parser;
 
 fn main() {
     // mid_level::test();
-    parser::test();
+    // parser::test();
 
-    // let mut output = String::new();
+    let file = "main.nce";
 
-    // codegen::gen_syscall(
-    //     &mut output,
-    //     Syscall::Write {
-    //         fildes: Operand::Immediate(1),
-    //         buf: Register::X1,
-    //         nbytes: Operand::Immediate(13),
-    //     },
-    // );
+    let res = fs::read_to_string(file).unwrap();
 
-    // let fun = codegen::Function {
-    //     name: "main".into(),
-    //     args: vec![codegen::Var {
-    //         name: "argc".into(),
-    //         byte_size: 4,
-    //     }],
-    //     local_variables: vec![codegen::Var {
-    //         name: "a".into(),
-    //         byte_size: 8,
-    //     }],
-    //     local_consts: vec![codegen::Const::LiteralIsize(42)],
-    //     statements: vec![
-    //         Statement::Assign(VarAssign {
-    //             target_index: 0,
-    //             source: Expr::Constant(0),
-    //         }),
-    //         Statement::Return(Some(Expr::Local(0))),
-    //     ],
-    // };
+    let module = parser::parse_module(&res).unwrap();
 
-    // let program = Program {
-    //     functions: vec![fun],
-    // };
+    if !module.0.is_empty() {
+        panic!("failed to parse: {}", module.0);
+    }
 
-    // codegen::gen_program(&mut output, &program);
+    let mut globals = vec![
+        parser::Ident("println".into()),
+        parser::Ident("add".into()),
+        parser::Ident("sub".into()),
+        parser::Ident("eq".into()),
+        parser::Ident("gt".into()),
+        parser::Ident("gte".into()),
+        parser::Ident("lt".into()),
+        parser::Ident("lte".into()),
+    ];
 
-    // fs::write("output.s", output).unwrap();
+    for fun in &module.1.functions {
+        globals.push(fun.name.clone());
+    }
 
-    // let assembled = std::process::Command::new("gcc")
-    //     .arg("-o")
-    //     .arg("output")
-    //     .arg("output.s")
-    //     .spawn()
-    //     .unwrap()
-    //     .wait()
-    //     .unwrap()
-    //     .success();
+    let mut out = String::new();
 
-    // if !assembled {
-    //     panic!("failed to compile");
-    // }
+    codegen::gen_arch_header(&mut out);
+    codegen::gen_text_section_header(&mut out);
+    codegen::gen_rt(&mut out);
 
-    // let res = std::process::Command::new("./output")
-    //     .spawn()
-    //     .unwrap()
-    //     .wait()
-    //     .unwrap()
-    //     .code();
+    let stdlib = fs::read_to_string("nstd/simple.s").unwrap();
 
-    // println!("program returned with {res:?}");
+    out.push_str(&stdlib);
+
+    for fun in module.1.functions {
+        let ctx = mid_level::gen_fn_bbs(globals.clone(), fun);
+
+        codegen::gen_from_context(&mut out, &ctx);
+    }
+
+    codegen::gen_data_section_header(&mut out);
+
+    fs::write("output.s", out).unwrap();
+
+    let assembled = std::process::Command::new("gcc")
+        .arg("-o")
+        .arg("output")
+        .arg("output.s")
+        .spawn()
+        .unwrap()
+        .wait()
+        .unwrap()
+        .success();
+
+    if !assembled {
+        panic!("failed to compile");
+    }
+
+    let res = std::process::Command::new("./output")
+        .spawn()
+        .unwrap()
+        .wait()
+        .unwrap()
+        .code();
+
+    println!("program returned with {res:?}");
 }
