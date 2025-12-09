@@ -1,7 +1,9 @@
 //! A toy language to try my hands with runtime code generation and
 //! maybe making it safe to call runtime generated code?
 
-use std::fs;
+use std::{collections::HashMap, fs};
+
+use crate::parser::Ident;
 
 pub mod bc;
 pub mod codegen;
@@ -48,10 +50,18 @@ fn main() {
 
     out.push_str(&stdlib);
 
-    for fun in module.1.functions {
-        let ctx = mid_level::gen_fn_bbs(globals.clone(), fun);
+    let ctxs = mid_level::gen_module(&globals, &module.1);
 
-        codegen::gen_from_context(&mut out, &ctx);
+    let mut type_map = HashMap::new();
+    type_map.insert(Ident("u64".into()), codegen::Layout { byte_size: 8 });
+    type_map.insert(Ident("u32".into()), codegen::Layout { byte_size: 4 });
+    type_map.insert(Ident("u16".into()), codegen::Layout { byte_size: 2 });
+    type_map.insert(Ident("u8".into()), codegen::Layout { byte_size: 1 });
+
+    for ctx in ctxs {
+        let mut ctx = codegen::CGContext::from_mid_level(&type_map, ctx);
+
+        ctx.generate(&mut out);
     }
 
     codegen::gen_data_section_header(&mut out);

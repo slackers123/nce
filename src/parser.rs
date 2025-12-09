@@ -1,20 +1,14 @@
 use qparse::{
-    ParseError, ParseRes, char, map_err,
+    ParseRes, char, map_err,
     multi::{many_with_separator, many_with_separator_lax, many0},
     parser::Parser,
-    sequence::{delimited, preceded, trailed},
+    sequence::{delimited, preceded},
     tag::tag,
     take_while::{alpha_num0, alpha1, take_while},
     to_optional, use_first,
     whitespace::{whitespace, whitespace_wrapped},
 };
-use std::{collections::HashMap, fmt::Display, str::FromStr};
-
-use crate::{
-    codegen,
-    mid_level::{self, RETURN_ARG_IDENT},
-    parser,
-};
+use std::str::FromStr;
 
 #[derive(Debug)]
 pub struct Module {
@@ -25,14 +19,14 @@ pub struct Module {
 pub struct Function {
     pub name: Ident,
     pub args: Vec<TypedIdent>,
-    pub ret_ty: Option<Type>,
+    pub ret_ty: Option<Ident>,
     pub block: Block,
 }
 
 #[derive(Debug, Clone)]
 pub struct TypedIdent {
     pub ident: Ident,
-    pub ty: Type,
+    pub ty: Ident,
 }
 
 #[derive(Debug, Clone)]
@@ -74,7 +68,7 @@ pub struct RawReturn {
 
 #[derive(Debug, Clone)]
 pub struct RawDef {
-    pub new_var: Ident,
+    pub new_var: TypedIdent,
     pub value: Expr,
 }
 
@@ -86,9 +80,6 @@ pub struct RawAssign {
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Ident(pub String);
-
-#[derive(Debug, Clone)]
-pub struct Type(pub String);
 
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -293,7 +284,7 @@ fn parse_return_stmt(input: &str) -> ParseRes<&str, Statement> {
 fn parse_def_stmt(input: &str) -> ParseRes<&str, Statement> {
     let (input, (_, new_var, _, value, _)) = (
         tag("let"),
-        whitespace_wrapped(parse_ident),
+        whitespace_wrapped(parse_typed_ident),
         tag('='),
         whitespace_wrapped(parse_basic_expr),
         tag(';'),
@@ -333,13 +324,13 @@ fn parse_typed_ident(input: &str) -> ParseRes<&str, TypedIdent> {
     Ok((input, TypedIdent { ident, ty }))
 }
 
-fn parse_type(input: &str) -> ParseRes<&str, Type> {
+fn parse_type(input: &str) -> ParseRes<&str, Ident> {
     let (input, raw) = alpha1(input)?;
     let (input, tail) = alpha_num0(input)?;
 
     let mut res = String::from(raw);
     res.push_str(tail);
-    Ok((input, Type(res)))
+    Ok((input, Ident(res)))
 }
 
 fn parse_ident(input: &str) -> ParseRes<&str, Ident> {
@@ -470,156 +461,3 @@ fn parse_literal_value(input: &str) -> ParseRes<&str, Value> {
     let (input, literal) = parse_literal(input)?;
     Ok((input, Value::Literal(literal)))
 }
-
-pub fn test() {
-    let module = parse_module(
-        r#"
-    fn main() -> i64 {
-        let a = 100 + 100;
-        return a + 100;
-    }"#,
-    )
-    .unwrap();
-
-    let mut globals = vec![
-        parser::Ident("println".into()),
-        parser::Ident("add".into()),
-        parser::Ident("sub".into()),
-        parser::Ident("eq".into()),
-    ];
-
-    for fun in &module.1.functions {
-        // globals.push(ident_to_mid_level(fun.name.clone()));
-    }
-
-    for fun in module.1.functions {
-        // let fun = fn_to_mid_level(fun);
-
-        // let ctx = mid_level::gen_fn_bbs(globals.clone(), fun);
-
-        // let mut out = String::new();
-        // codegen::gen_from_context(&mut out, &ctx);
-
-        // println!("{out}");
-    }
-}
-
-// pub fn fn_to_mid_level(fun: Function) -> mid_level::Function {
-//     mid_level::Function {
-//         name: fun.name.0,
-//         args: fun
-//             .args
-//             .into_iter()
-//             .map(|a| ident_to_mid_level(a.ident))
-//             .collect(),
-//         block: mid_level::FunctionBlock::Regular(block_to_mid_level(fun.block)),
-//     }
-// }
-
-// pub fn ident_to_mid_level(ident: Ident) -> mid_level::Ident {
-//     mid_level::Ident(ident.0)
-// }
-
-// pub fn stmt_to_mid_level(stmt: Statement) -> Vec<mid_level::Statement> {
-//     match stmt {
-//         Statement::Assign(RawAssign { target, value }) => {
-//             vec![mid_level::Statement::VarAssign(
-//                 ident_to_mid_level(target),
-//                 expr_to_mid_level(value),
-//             )]
-//         }
-//         Statement::Block(b) => b
-//             .statements
-//             .into_iter()
-//             .flat_map(stmt_to_mid_level)
-//             .collect(),
-//         Statement::Def(RawDef { new_var, value }) => vec![mid_level::Statement::VarDecl(
-//             ident_to_mid_level(new_var),
-//             Some(expr_to_mid_level(value)),
-//         )],
-//         Statement::Expression(e) => {
-//             // FIXME: This is a hacky way of returning the last expression
-//             vec![mid_level::Statement::VarAssign(
-//                 RETURN_ARG_IDENT.clone(),
-//                 expr_to_mid_level(e),
-//             )]
-//         }
-//         Statement::If(RawIf {
-//             condition,
-//             then_block,
-//             else_ifs,
-//             else_block,
-//         }) => {
-//             if !else_ifs.is_empty() {
-//                 todo!()
-//             }
-
-//             vec![mid_level::Statement::If(mid_level::IfStatement {
-//                 condition: expr_to_mid_level(condition),
-//                 success: block_to_mid_level(then_block),
-//                 failure: else_block.map(|b| block_to_mid_level(b)),
-//             })]
-//         }
-//         Statement::Return(RawReturn { to_return }) => {
-//             vec![mid_level::Statement::Return(Some(expr_to_mid_level(
-//                 to_return,
-//             )))]
-//         }
-//         Statement::While(RawWhile {
-//             condition,
-//             while_block,
-//         }) => {
-//             let mut stmts = vec![mid_level::Statement::If(mid_level::IfStatement {
-//                 condition: expr_to_mid_level(condition),
-//                 success: mid_level::Block { stmts: vec![] },
-//                 failure: Some(mid_level::Block {
-//                     stmts: vec![mid_level::Statement::Break],
-//                 }),
-//             })];
-//             stmts.append(&mut block_to_mid_level(while_block).stmts);
-
-//             vec![mid_level::Statement::Loop(mid_level::Block { stmts })]
-//         }
-//     }
-// }
-
-// pub fn expr_to_mid_level(expr: Expr) -> mid_level::Expr {
-//     match expr {
-//         Expr::EBin(BinExpr { lhs, rhs, op }) => {
-//             let op = match op {
-//                 BinOp::Add => "add",
-//                 BinOp::Eq => "eq",
-//                 BinOp::Lt => "lt",
-//                 BinOp::Lte => "lte",
-//                 BinOp::Sub => "sub",
-//                 _ => todo!("{op:?}"),
-//             };
-//             mid_level::Expr::FnCall(mid_level::FnCallExpr {
-//                 callable: Box::new(mid_level::Expr::Global(mid_level::Ident(op.into()))),
-//                 args: vec![expr_to_mid_level(*lhs), expr_to_mid_level(*rhs)],
-//             })
-//         }
-
-//         Expr::EVal(v) => match *v {
-//             Value::FnCall(f) => mid_level::Expr::FnCall(mid_level::FnCallExpr {
-//                 callable: Box::new(mid_level::Expr::Global(ident_to_mid_level(f.name))),
-//                 args: f.args.into_iter().map(expr_to_mid_level).collect(),
-//             }),
-//             Value::Ident(i) => mid_level::Expr::Local(ident_to_mid_level(i)),
-//             Value::Literal(Literal::Number(n)) => {
-//                 mid_level::Expr::Immediate(mid_level::Immediate { val: n as u64 })
-//             }
-//             _ => todo!(),
-//         },
-//     }
-// }
-
-// pub fn block_to_mid_level(b: Block) -> mid_level::Block {
-//     mid_level::Block {
-//         stmts: b
-//             .statements
-//             .into_iter()
-//             .flat_map(stmt_to_mid_level)
-//             .collect(),
-//     }
-// }

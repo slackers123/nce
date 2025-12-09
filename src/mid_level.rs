@@ -11,12 +11,12 @@
 use std::sync::LazyLock;
 
 use crate::parser::{
-    BinExpr, BinOp, Block, Expr, Function, Ident, Literal, RawAssign, RawDef, RawIf, RawReturn,
-    RawWhile, Statement, Value,
+    self, BinExpr, BinOp, Block, Expr, Ident, Literal, Module, RawAssign, RawDef, RawIf, RawReturn,
+    RawWhile, Statement, TypedIdent, Value,
 };
 
 pub static RETURN_ARG_IDENT: LazyLock<Ident> = LazyLock::new(|| Ident(String::from("return_args")));
-const RETURN_ARG_LOCAL: Local = Local(0);
+const RETURN_ARG_LOCAL: LocalId = LocalId(0);
 
 #[derive(Debug, Clone)]
 pub struct BasicBlock {
@@ -28,37 +28,50 @@ pub struct BasicBlock {
 // A three address code
 #[derive(Debug, Clone)]
 pub struct Tac {
-    pub target: Local,
+    pub target: LocalId,
     pub source: Source,
 }
 
 #[derive(Debug, Clone)]
 pub enum Source {
     Immediate(Immediate),
-    Local(Local),
-    Global(Global),
+    Local(LocalId),
+    Global(GlobalId),
     FnCall(FnCall),
 }
 
-#[derive(Debug, Clone)]
+impl Source {
+    pub fn get_type(&self, ctx: &Context) -> Option<Ident> {
+        match self {
+            Self::Immediate(_) => Some(Ident("u64".into())),
+            Self::Local(l) => ctx.locals[l.0].1.clone(),
+            Self::Global(g) => todo!("global types"),
+            Self::FnCall(fncall) => fncall.ret_ty.clone(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub struct Immediate {
     pub val: u64,
+    pub byte_size: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct Local(pub usize);
+pub struct LocalId(pub usize);
 
 #[derive(Debug, Clone, Copy)]
-pub struct Global(pub usize);
+pub struct GlobalId(pub usize);
 
 #[derive(Debug, Clone)]
 pub enum Callable {
     Named(String),
-    FnPointer(Local),
+    FnPointer(LocalId),
 }
 
 #[derive(Debug, Clone)]
 pub struct FnCall {
+    pub ret_ty: Option<Ident>,
     pub callable: Callable,
     pub args: Vec<Arg>,
 }
@@ -66,8 +79,8 @@ pub struct FnCall {
 #[derive(Debug, Clone)]
 pub enum Arg {
     Immediate(Immediate),
-    Local(Local),
-    Global(Global),
+    Local(LocalId),
+    Global(GlobalId),
 }
 
 #[derive(Debug, Clone)]
@@ -78,10 +91,11 @@ pub enum Terminator {
 }
 
 #[derive(Debug, Clone)]
-pub struct Context {
+pub struct Context<'src> {
+    module: &'src parser::Module,
     pub name: String,
-    pub locals: Vec<Option<Ident>>,
-    pub globals: Vec<Ident>,
+    pub locals: Vec<(Option<Ident>, Option<Ident>)>,
+    pub globals: &'src [Ident],
     pub basic_blocks: Vec<BasicBlock>,
     pub arg_count: usize,
     pub assembly: Option<String>,
@@ -89,15 +103,26 @@ pub struct Context {
     loop_info: Option<(usize, Vec<usize>)>,
 }
 
-impl Context {
-    pub fn from_fn(globals: Vec<Ident>, fun: &Function) -> Self {
-        Self::from_asm_fn(globals, fun, None)
+impl<'src> Context<'src> {
+    pub fn from_fn(globals: &'src [Ident], module: &'src Module, fn_index: usize) -> Self {
+        Self::from_asm_fn(globals, module, fn_index, None)
     }
 
-    pub fn from_asm_fn(globals: Vec<Ident>, fun: &Function, assembly: Option<String>) -> Self {
-        let mut locals = vec![Some(RETURN_ARG_IDENT.clone())];
+    pub fn from_asm_fn(
+        globals: &'src [Ident],
+        module: &'src Module,
+        fn_index: usize,
+        assembly: Option<String>,
+    ) -> Self {
+        let fun = &module.functions[fn_index];
+        let mut locals = vec![(Some(RETURN_ARG_IDENT.clone()), fun.ret_ty.clone())];
         let arg_count = fun.args.len();
-        let mut args: Vec<_> = fun.args.iter().cloned().map(|a| Some(a.ident)).collect();
+        let mut args: Vec<_> = fun
+            .args
+            .iter()
+            .cloned()
+            .map(|a| (Some(a.ident), Some(a.ty)))
+            .collect();
         locals.append(&mut args);
 
         Self {
@@ -109,29 +134,51 @@ impl Context {
             loop_info: None,
             arg_count,
             assembly,
+            module,
         }
     }
 
-    pub fn get_local(&mut self, ident: Ident) -> Local {
+    pub fn get_local(&mut self, ident: &TypedIdent) -> LocalId {
         for (i, local) in self.locals.iter().enumerate() {
-            if local.as_ref() == Some(&ident) {
-                return Local(i);
+            if local.0.as_ref() == Some(&ident.ident) {
+                return LocalId(i);
             }
         }
 
-        self.locals.push(Some(ident));
+        let new_local = LocalId(self.locals.len());
 
-        return Local(self.locals.len() - 1);
+        self.locals
+            .push((Some(ident.ident.clone()), Some(ident.ty.clone())));
+
+        return new_local;
     }
 
-    pub fn get_anonymous_local(&mut self) -> Local {
-        self.locals.push(None);
+    pub fn find_local(&mut self, ident: &Ident) -> LocalId {
+        for (i, local) in self.locals.iter().enumerate() {
+            if local.0.as_ref() == Some(&ident) {
+                return LocalId(i);
+            }
+        }
 
-        return Local(self.locals.len() - 1);
+        todo!();
     }
 
-    pub fn get_global(&self, ident: Ident) -> Global {
-        return Global(
+    pub fn resolve_function_return_type(&self, fn_name: &Ident) -> Option<Ident> {
+        self.module
+            .functions
+            .iter()
+            .find_map(|f| (&f.name == fn_name).then(|| f.ret_ty.clone()))
+            .expect("could not find specified function")
+    }
+
+    pub fn get_anonymous_local(&mut self, ty: &Option<Ident>) -> LocalId {
+        self.locals.push((None, ty.clone()));
+
+        return LocalId(self.locals.len() - 1);
+    }
+
+    pub fn get_global(&self, ident: Ident) -> GlobalId {
+        return GlobalId(
             self.globals
                 .iter()
                 .position(|g| *g == ident)
@@ -139,7 +186,7 @@ impl Context {
         );
     }
 
-    pub fn find_global(&self, global: Global) -> Ident {
+    pub fn find_global(&self, global: GlobalId) -> Ident {
         self.globals[global.0].clone()
     }
 
@@ -237,27 +284,31 @@ impl Context {
     }
 }
 
-pub fn gen_fn_bbs(globals: Vec<Ident>, fun: Function) -> Context {
-    let mut ctx = Context::from_fn(globals, &fun);
+pub fn gen_module<'src>(globals: &'src [Ident], module: &'src Module) -> Vec<Context<'src>> {
+    (0..module.functions.len())
+        .map(|i| {
+            let mut ctx = Context::from_fn(globals, module, i);
 
-    ctx.start_new_bb();
+            ctx.start_new_bb();
 
-    gen_block_bbs(&mut ctx, fun.block);
+            gen_block_bbs(&mut ctx, &module.functions[i].block);
 
-    ctx.finish_fn();
+            ctx.finish_fn();
 
-    ctx
+            ctx
+        })
+        .collect()
 }
 
-pub fn gen_block_bbs(ctx: &mut Context, block: Block) -> Option<Source> {
+pub fn gen_block_bbs(ctx: &mut Context, block: &Block) -> Option<Source> {
     let stmt_len = block.stmts.len();
-    for (i, stmt) in block.stmts.into_iter().enumerate() {
+    for (i, stmt) in block.stmts.iter().enumerate() {
         match stmt {
             Statement::Block(b) => {
                 gen_block_bbs(ctx, b);
             }
             Statement::Return(RawReturn { to_return }) => {
-                let source = gen_expr(ctx, to_return)
+                let source = gen_expr(ctx, to_return, 1)
                     .expect("expression on the right side of an assignment must yeild a value");
 
                 ctx.add_tac_to_bb(Tac {
@@ -281,13 +332,14 @@ pub fn gen_block_bbs(ctx: &mut Context, block: Block) -> Option<Source> {
             Statement::Def(RawDef { new_var, value }) => {
                 let target = ctx.get_local(new_var);
 
-                let source = gen_expr(ctx, value)
+                let source = gen_expr(ctx, value, 4)
                     .expect("expression on the right side of an assignment must yeild a value");
+
                 ctx.add_tac_to_bb(Tac { target, source });
             }
             Statement::Assign(RawAssign { target, value }) => {
-                let target = ctx.get_local(target);
-                let source = gen_expr(ctx, value)
+                let target = ctx.find_local(target);
+                let source = gen_expr(ctx, value, 4)
                     .expect("expression on the right side of an assignment must yeild a value");
                 ctx.add_tac_to_bb(Tac { target, source });
             }
@@ -297,7 +349,7 @@ pub fn gen_block_bbs(ctx: &mut Context, block: Block) -> Option<Source> {
             }) => {
                 let old_state = ctx.start_loop();
 
-                let cond = gen_expr(ctx, condition)
+                let cond = gen_expr(ctx, condition, 1)
                     .expect("expression used as a condition must yeild a value");
 
                 let needs_goto_targets = ctx.finish_bb(Terminator::GotoCond(cond, 0, 0));
@@ -322,7 +374,7 @@ pub fn gen_block_bbs(ctx: &mut Context, block: Block) -> Option<Source> {
                 ctx.add_loop_continue();
             }
             Statement::Expression(e, had_trailing_semicolon) => {
-                let src = gen_expr(ctx, e);
+                let src = gen_expr(ctx, e, 0);
                 if !had_trailing_semicolon {
                     assert!(
                         i == stmt_len - 1,
@@ -337,19 +389,20 @@ pub fn gen_block_bbs(ctx: &mut Context, block: Block) -> Option<Source> {
     None
 }
 
-pub fn gen_if(ctx: &mut Context, raw_if: RawIf) -> Option<Source> {
+pub fn gen_if(ctx: &mut Context, raw_if: &RawIf) -> Option<Source> {
     let RawIf {
         condition,
         then_block,
         else_ifs,
         else_block,
     } = raw_if;
+
     if !else_ifs.is_empty() {
         todo!("else if blocks");
     }
 
     let cond =
-        gen_expr(ctx, condition).expect("expression used as a condition must yeild a result");
+        gen_expr(ctx, condition, 1).expect("expression used as a condition must yeild a result");
 
     let needs_goto_targets = ctx.finish_bb(Terminator::GotoCond(cond, 0, 0));
 
@@ -358,7 +411,7 @@ pub fn gen_if(ctx: &mut Context, raw_if: RawIf) -> Option<Source> {
     let success_result = gen_block_bbs(ctx, then_block);
 
     let result = if let Some(success_result) = success_result {
-        let result = ctx.get_anonymous_local();
+        let result = ctx.get_anonymous_local(&success_result.get_type(ctx));
         assert!(else_block.is_some(), "if blocks must return the same type");
 
         ctx.add_tac_to_bb(Tac {
@@ -406,17 +459,17 @@ pub fn gen_if(ctx: &mut Context, raw_if: RawIf) -> Option<Source> {
     result.map(|l| Source::Local(l))
 }
 
-pub fn gen_expr(ctx: &mut Context, expr: Expr) -> Option<Source> {
+pub fn gen_expr(ctx: &mut Context, expr: &Expr, target_byte_size: usize) -> Option<Source> {
     match expr {
-        Expr::EBin(bin) => Some(gen_bin_expr(ctx, bin)),
-        Expr::EVal(value) => gen_value_expr(ctx, *value),
+        Expr::EBin(bin) => Some(gen_bin_expr(ctx, bin, target_byte_size)),
+        Expr::EVal(value) => gen_value_expr(ctx, value, target_byte_size),
     }
 }
 
-pub fn gen_bin_expr(ctx: &mut Context, bin: BinExpr) -> Source {
-    let lhs = gen_expr_arg(ctx, *bin.lhs)
+pub fn gen_bin_expr(ctx: &mut Context, bin: &BinExpr, target_byte_size: usize) -> Source {
+    let lhs = gen_expr_arg(ctx, &*bin.lhs, target_byte_size)
         .expect("expression used in a binary operation must yeild a value");
-    let rhs = gen_expr_arg(ctx, *bin.rhs)
+    let rhs = gen_expr_arg(ctx, &*bin.rhs, target_byte_size)
         .expect("expression used in a binary operation must yeild a value");
 
     let op = match bin.op {
@@ -433,32 +486,38 @@ pub fn gen_bin_expr(ctx: &mut Context, bin: BinExpr) -> Source {
         BinOp::Exp => "exp",
     };
     Source::FnCall(FnCall {
+        ret_ty: Some(Ident(format!("u{}", target_byte_size * 8))), // FIXME: THIS IS A HORRIBLE HACK
         callable: Callable::Named(op.into()),
         args: vec![lhs, rhs],
     })
 }
 
-pub fn gen_value_expr(ctx: &mut Context, value: Value) -> Option<Source> {
+pub fn gen_value_expr(ctx: &mut Context, value: &Value, target_byte_size: usize) -> Option<Source> {
     match value {
         Value::Literal(lit) => {
             if let Literal::Number(n) = lit {
-                Some(Source::Immediate(Immediate { val: n as u64 }))
+                Some(Source::Immediate(Immediate {
+                    val: *n as u64,
+                    byte_size: target_byte_size,
+                }))
             } else {
                 todo!("string literals")
             }
         }
-        Value::Ident(i) => Some(Source::Local(ctx.get_local(i))),
+        Value::Ident(i) => Some(Source::Local(ctx.find_local(i))),
         Value::FnCall(fncall) => {
             let args = fncall
                 .args
-                .into_iter()
+                .iter()
                 .map(|e| {
-                    gen_expr_arg(ctx, e).expect("expression used as an argument must yeild a value")
+                    gen_expr_arg(ctx, e, target_byte_size)
+                        .expect("expression used as an argument must yeild a value")
                 })
                 .collect();
 
             Some(Source::FnCall(FnCall {
-                callable: Callable::Named(fncall.name.0),
+                ret_ty: ctx.resolve_function_return_type(&fncall.name),
+                callable: Callable::Named(fncall.name.0.clone()),
                 args,
             }))
         }
@@ -467,14 +526,14 @@ pub fn gen_value_expr(ctx: &mut Context, value: Value) -> Option<Source> {
     }
 }
 
-pub fn gen_expr_arg(ctx: &mut Context, e: Expr) -> Option<Arg> {
-    if let Some(expr) = gen_expr(ctx, e) {
+pub fn gen_expr_arg(ctx: &mut Context, e: &Expr, target_byte_size: usize) -> Option<Arg> {
+    if let Some(expr) = gen_expr(ctx, e, target_byte_size) {
         Some(match expr {
             Source::Immediate(c) => Arg::Immediate(c),
             Source::Local(l) => Arg::Local(l),
             Source::Global(g) => Arg::Global(g),
             Source::FnCall(fncall) => {
-                let anon = ctx.get_anonymous_local();
+                let anon = ctx.get_anonymous_local(&fncall.ret_ty);
                 ctx.add_tac_to_bb(Tac {
                     target: anon,
                     source: Source::FnCall(fncall),
@@ -486,91 +545,4 @@ pub fn gen_expr_arg(ctx: &mut Context, e: Expr) -> Option<Arg> {
     } else {
         None
     }
-}
-
-pub fn test() {
-    //  fn add(a: i32, b: i32) -> i32 {
-    //      let c = 10;
-    //      while b > c {
-    //          c = c + 1;
-    //      }
-    //
-    //      return c + a;
-    //  }
-    //
-    //  fn add(a: i32, b: i32) -> i32 {
-    //      let c = 10;
-    //
-    //      loop {
-    //          if !(b > c) {
-    //              break;
-    //          }
-    //          c = c + 1;
-    //      }
-    //
-    //      return c + a;
-    //  }
-    //
-    // 0 => return_reg
-    // 1 => a
-    // 2 => b
-    // 3 => c
-    // 4 => d
-
-    let globals = vec![Ident("add".into()), Ident("gt".into())];
-
-    // let res = gen_fn_bbs(
-    //     globals,
-    //     Function {
-    //         name: "main".into(),
-    //         args: vec![Ident("a"), Ident("b")],
-    //         block: FunctionBlock::Regular(Block {
-    //             stmts: vec![
-    //                 Statement::VarDecl(Ident("c"), Some(Expr::Immediate(Immediate { val: 10 }))),
-    //                 Statement::VarDecl(Ident("d"), None),
-    //                 Statement::If(IfStatement {
-    //                     condition: Expr::FnCall(FnCallExpr {
-    //                         callable: Box::new(Expr::Global(Ident("gt"))),
-    //                         args: vec![Expr::Local(Ident("b")), Expr::Local(Ident("c"))],
-    //                     }),
-    //                     success: Block {
-    //                         stmts: vec![Statement::VarAssign(
-    //                             Ident("d"),
-    //                             Expr::FnCall(FnCallExpr {
-    //                                 callable: Box::new(Expr::Global(Ident("add"))),
-    //                                 args: vec![Expr::Local(Ident("c")), Expr::Local(Ident("b"))],
-    //                             }),
-    //                         )],
-    //                     },
-    //                     failure: Some(Block {
-    //                         stmts: vec![Statement::VarAssign(
-    //                             Ident("d"),
-    //                             Expr::FnCall(FnCallExpr {
-    //                                 callable: Box::new(Expr::Global(Ident("add"))),
-    //                                 args: vec![Expr::Local(Ident("c")), Expr::Local(Ident("a"))],
-    //                             }),
-    //                         )],
-    //                     }),
-    //                 }),
-    //                 Statement::Return(Some(Expr::Local(Ident("d")))),
-    //             ],
-    //         }),
-    //     },
-    // );
-
-    // let res = gen_fn_bbs(
-    //     globals,
-    //     Function {
-    //         name: "main".into(),
-    //         args: vec![Ident("a".into()), Ident("b".into())],
-    //         block: FunctionBlock::Assembly(AssemblyBlock {
-    //             assembly: "mov x0, x1".into(),
-    //         }),
-    //     },
-    // );
-    // let mut out = String::new();
-
-    // codegen::gen_from_context(&mut out, &res);
-
-    // println!("{}", out);
 }

@@ -58,74 +58,74 @@ main:
 stp fp, lr, [sp,  #-32]!
 mov fp, sp
 main_bb0:
-mov x0, #0
-str x0, [sp,  #16]
+mov w0, #0
+strb w0, [sp,  #16]
 b main_bb1
 main_bb1:
-ldr x0, [sp,  #16]
-mov x1, #10
+ldrb w0, [sp,  #16]
+mov w1, #10
 bl lt
-#mov x0, x0
-cmp x0, xzr
+#mov w0, w0
+cmp w0, wzr
 bne main_bb2
 b main_bb3
 main_bb2:
-ldr x0, [sp,  #16]
-mov x1, #1
+ldrb w0, [sp,  #16]
+mov w1, #1
 bl add
-#mov x0, x0
-str x0, [sp,  #16]
+#mov w0, w0
+strb w0, [sp,  #16]
 b main_bb1
 main_bb3:
-ldr x0, [sp,  #16]
+ldrb w0, [sp,  #16]
 bl fib
-#mov x0, x0
+#mov w0, w0
 b main_exit
 main_exit:
 ldp fp, lr, [sp], #32
 ret
 fib:
-stp fp, lr, [sp,  #-64]!
+stp fp, lr, [sp,  #-32]!
 mov fp, sp
-str x0, [sp,  #16]
+strb w0, [sp,  #16]
 fib_bb0:
-ldr x0, [sp,  #16]
-mov x1, #1
+ldrb w0, [sp,  #16]
+mov w1, #1
 bl lte
-#mov x0, x0
-cmp x0, xzr
+#mov w0, w0
+cmp w0, wzr
 bne fib_bb1
 b fib_bb3
 fib_bb1:
-ldr x0, [sp,  #16]
+ldrb w0, [sp,  #16]
 b fib_exit
 fib_bb2:
 b fib_bb3
 fib_bb3:
-ldr x0, [sp,  #16]
-mov x1, #1
+ldrb w0, [sp,  #16]
+mov w1, #1
 bl sub
-#mov x0, x0
-str x0, [sp,  #24]
-ldr x0, [sp,  #24]
+#mov w0, w0
+strb w0, [sp,  #17]
+ldrb w0, [sp,  #17]
 bl fib
-#mov x0, x0
-str x0, [sp,  #32]
-ldr x0, [sp,  #16]
-mov x1, #2
+#mov w0, w0
+strb w0, [sp,  #18]
+ldrb w0, [sp,  #16]
+mov w1, #2
 bl sub
-#mov x0, x0
-str x0, [sp,  #40]
-ldr x0, [sp,  #40]
+#mov w0, w0
+strb w0, [sp,  #19]
+ldrb w0, [sp,  #19]
 bl fib
-#mov x0, x0
-str x0, [sp,  #48]
-ldr x0, [sp,  #32]
-ldr x1, [sp,  #48]
+#mov w0, w0
+strb w0, [sp,  #20]
+ldrb w0, [sp,  #18]
+ldrb w1, [sp,  #20]
 bl add
-#mov x0, x0
+#mov w0, w0
 b fib_exit
 fib_exit:
-ldp fp, lr, [sp], #64
+ldp fp, lr, [sp], #32
 ret
 .section __DATA,__data

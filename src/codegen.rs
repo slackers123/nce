@@ -1,6 +1,293 @@
-use std::fmt::Write;
+use std::{collections::HashMap, fmt::Write, panic};
 
-use crate::mid_level;
+use crate::{
+    mid_level::{self, Immediate},
+    parser::Ident,
+};
+
+#[derive(Debug, Clone, Copy)]
+pub struct Layout {
+    pub byte_size: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct CGContext<'src> {
+    types: &'src HashMap<Ident, Layout>,
+    locals: Vec<Layout>,
+    mid_level: mid_level::Context<'src>,
+}
+
+impl<'src> CGContext<'src> {
+    pub fn from_mid_level(
+        types: &'src HashMap<Ident, Layout>,
+        mid_level: mid_level::Context<'src>,
+    ) -> Self {
+        Self {
+            types,
+            locals: mid_level
+                .locals
+                .iter()
+                .map(|v| {
+                    v.1.as_ref()
+                        .map(|v| types.get(v).unwrap().clone())
+                        .unwrap_or(Layout { byte_size: 0 })
+                })
+                .collect(),
+            mid_level,
+        }
+    }
+
+    pub fn get_reg_for_local(&self, local: &mid_level::LocalId) -> Register {
+        Register::from_layout(&self.locals[local.0])
+    }
+
+    pub fn get_reg_for_local_indexed(&self, local: &mid_level::LocalId, index: usize) -> Register {
+        Register::from_layout_indexed(&self.locals[local.0], index)
+    }
+
+    pub fn get_reg_for_ret_ty(&self, fn_call: &mid_level::FnCall) -> Register {
+        Register::from_layout(
+            &self.get_type_layout(
+                fn_call
+                    .ret_ty
+                    .as_ref()
+                    .expect("fn call used as source must have a return type"),
+            ),
+        )
+    }
+
+    pub fn get_reg_for_source(&self, source: &mid_level::Source) -> Register {
+        match source {
+            mid_level::Source::Immediate(Immediate { val: _, byte_size }) => {
+                Register::from_layout(&Layout {
+                    byte_size: *byte_size,
+                })
+            }
+            mid_level::Source::Local(l) => self.get_reg_for_local(l),
+            mid_level::Source::Global(g) => todo!("globals"),
+            mid_level::Source::FnCall(fn_call) => self.get_reg_for_ret_ty(fn_call),
+        }
+    }
+
+    pub fn get_reg_for_arg(&self, source: &mid_level::Arg, index: usize) -> Register {
+        match source {
+            mid_level::Arg::Immediate(Immediate { val: _, byte_size }) => {
+                Register::from_layout_indexed(
+                    &Layout {
+                        byte_size: *byte_size,
+                    },
+                    index,
+                )
+            }
+            mid_level::Arg::Local(l) => self.get_reg_for_local_indexed(l, index),
+            mid_level::Arg::Global(g) => todo!("globals"),
+        }
+    }
+
+    pub fn get_type_layout(&self, ty: &Ident) -> Layout {
+        *self
+            .types
+            .get(ty)
+            .expect(&format!("could not resolve type: {ty:?}"))
+    }
+
+    pub fn generate(&mut self, out: &mut String) {
+        if let Some(asm) = &self.mid_level.assembly {
+            gen_label(out, &self.mid_level.name);
+
+            out.push_str(&asm);
+            out.push('\n');
+
+            writeln!(out, "ret").unwrap();
+        } else {
+            self.gen_fn_prologue(out);
+
+            for bb in &self.mid_level.basic_blocks {
+                self.gen_bb(out, bb);
+            }
+
+            self.gen_fn_epilogue(out);
+        }
+    }
+
+    pub fn gen_fn_prologue(&mut self, out: &mut String) {
+        gen_label(out, &self.mid_level.name);
+
+        let stack_size = self.calc_stack_size();
+
+        gen_store_pair(
+            out,
+            Register::FP,
+            Register::LR,
+            Indexed::PreIndex(Register::SP, Offset(-(stack_size as i64))),
+        );
+
+        gen_move(out, Register::FP, Register::SP);
+
+        for i in 0..self.mid_level.arg_count {
+            gen_store(
+                out,
+                Register::from_layout_indexed(&self.locals[i + 1], i),
+                self.get_local_indexed(&mid_level::LocalId(i + 1)),
+                self.locals[i + 1].byte_size,
+            );
+        }
+    }
+
+    pub fn gen_fn_epilogue(&self, out: &mut String) {
+        gen_label(out, &self.mid_level.get_exit_name());
+
+        let stack_size = self.calc_stack_size();
+        gen_load_pair(
+            out,
+            Register::FP,
+            Register::LR,
+            Indexed::PostIndex(Register::SP, Offset(stack_size as i64)),
+        );
+
+        writeln!(out, "ret").unwrap();
+    }
+
+    pub fn calc_stack_size(&self) -> usize {
+        let int = self.locals.iter().map(|l| l.byte_size).sum::<usize>() + 16;
+        let rem = int % 16;
+        if rem == 0 { int } else { int + (16 - rem) }
+    }
+
+    pub fn get_local_indexed(&self, local: &mid_level::LocalId) -> Indexed {
+        let location = self
+            .locals
+            .iter()
+            .take(local.0 - 1)
+            .map(|l| l.byte_size)
+            .sum::<usize>()
+            + 16;
+
+        Indexed::Offset(Register::SP, Some(Offset(location as i64)))
+    }
+
+    pub fn get_global_indexed(&self, global: &mid_level::GlobalId) -> Indexed {
+        todo!()
+    }
+
+    pub fn gen_store_in_local(
+        &self,
+        out: &mut String,
+        source: Register,
+        target: &mid_level::LocalId,
+    ) {
+        gen_store(
+            out,
+            source,
+            self.get_local_indexed(target),
+            self.locals[target.0].byte_size,
+        );
+    }
+
+    pub fn gen_load_local(&self, out: &mut String, source: &mid_level::LocalId, target: Register) {
+        gen_load(
+            out,
+            target,
+            self.get_local_indexed(source),
+            self.locals[source.0].byte_size,
+        );
+    }
+
+    pub fn gen_tac(&self, out: &mut String, tac: &mid_level::Tac) {
+        let reg = self.get_reg_for_local(&tac.target);
+        self.gen_load_source(out, &tac.source, reg);
+
+        // FIXME: This is a hacky solution for storing the return
+        // value.
+
+        if tac.target.0 == 0 {
+            return;
+        }
+
+        self.gen_store_in_local(out, reg, &tac.target);
+    }
+
+    pub fn gen_load_source(&self, out: &mut String, source: &mid_level::Source, target: Register) {
+        use mid_level::Source;
+        match source {
+            Source::Immediate(imm) => gen_move(out, target, *imm),
+            Source::Local(l) => self.gen_load_local(out, l, target),
+            Source::Global(g) => self.gen_load_global(out, g, target),
+            Source::FnCall(fn_call) => self.gen_fn_call(out, fn_call, target),
+        }
+    }
+
+    pub fn gen_load_global(
+        &self,
+        out: &mut String,
+        source: &mid_level::GlobalId,
+        target: Register,
+    ) {
+        // FIXME: globals are assumed to be 8 bytes
+        gen_load(out, target, self.get_global_indexed(source), 8);
+    }
+
+    pub fn gen_fn_call(&self, out: &mut String, fn_call: &mid_level::FnCall, target: Register) {
+        for (i, arg) in fn_call.args.iter().enumerate() {
+            self.gen_load_arg(out, arg, self.get_reg_for_arg(&arg, i));
+        }
+
+        match &fn_call.callable {
+            mid_level::Callable::FnPointer(f) => todo!(),
+            mid_level::Callable::Named(n) => gen_branch_with_link(out, &Callable::Label(n.clone())),
+        }
+
+        gen_move(out, target, self.get_reg_for_ret_ty(fn_call));
+    }
+
+    pub fn gen_load_arg(&self, out: &mut String, source: &mid_level::Arg, target: Register) {
+        use mid_level::Arg;
+        match source {
+            Arg::Global(g) => self.gen_load_global(out, g, target),
+            Arg::Local(l) => self.gen_load_local(out, l, target),
+            Arg::Immediate(imm) => gen_move(out, target, *imm),
+        }
+    }
+
+    pub fn gen_bb(&self, out: &mut String, bb: &mid_level::BasicBlock) {
+        gen_label(out, &self.mid_level.get_bb_name(bb.id));
+
+        for tac in &bb.tacs {
+            self.gen_tac(out, tac);
+        }
+
+        self.gen_term(out, &bb.terminator);
+    }
+
+    pub fn gen_term(&self, out: &mut String, term: &mid_level::Terminator) {
+        use mid_level::Terminator;
+        match term {
+            Terminator::Return => {
+                gen_jump(out, Jump::Unconditional(self.mid_level.get_exit_name()))
+            }
+            Terminator::Goto(goto) => self.gen_jump_to_bb(out, *goto),
+            Terminator::GotoCond(cond, success, failure) => {
+                let reg = self.get_reg_for_source(cond);
+                self.gen_load_source(out, cond, reg);
+
+                writeln!(
+                    out,
+                    "cmp {}, {}",
+                    reg.get_str(),
+                    reg.get_associated_zero_reg().get_str()
+                )
+                .unwrap();
+
+                writeln!(out, "bne {}", self.mid_level.get_bb_name(*success)).unwrap();
+                writeln!(out, "b {}", self.mid_level.get_bb_name(*failure)).unwrap();
+            }
+        }
+    }
+
+    pub fn gen_jump_to_bb(&self, out: &mut String, bbid: usize) {
+        writeln!(out, "b {}", self.mid_level.get_bb_name(bbid)).unwrap();
+    }
+}
 
 pub const ENTRY: &str = "_main";
 
@@ -32,15 +319,16 @@ pub enum Register {
     W5,
     W6,
     W7,
+    WZR = 40,
 }
 
 impl Register {
     pub fn get_str(&self) -> String {
         match *self as i8 {
-            0..7 | 16 => {
+            0..=7 | 16 => {
                 format!("x{}", *self as i8)
             }
-            32..39 => {
+            32..=39 => {
                 format!("w{}", (*self as i8) - 32)
             }
             -2 => "pc".to_string(),
@@ -48,7 +336,33 @@ impl Register {
             29 => "fp".to_string(),
             30 => "lr".to_string(),
             31 => "xzr".to_string(),
+            40 => "wzr".to_string(),
             _ => panic!("unsupported register: {self:?}"),
+        }
+    }
+
+    pub fn get_associated_zero_reg(&self) -> Register {
+        match *self as i8 {
+            0..=7 | 16 => Register::XZR,
+            32..=40 => Register::WZR,
+            31 => Register::XZR,
+            _ => panic!("unsupported register: {self:?}"),
+        }
+    }
+
+    pub fn from_layout(layout: &Layout) -> Register {
+        match layout.byte_size {
+            0..8 => Register::W0,
+            8 => Register::X0,
+            _ => panic!("unsupported local size"),
+        }
+    }
+
+    pub fn from_layout_indexed(layout: &Layout, index: usize) -> Register {
+        match layout.byte_size {
+            0..8 => Register::from_usize_word(index),
+            8 => Register::from_usize(index),
+            _ => panic!("unsupported local size"),
         }
     }
 
@@ -65,6 +379,20 @@ impl Register {
             _ => panic!("register with id {i} not supported"),
         }
     }
+
+    pub fn from_usize_word(i: usize) -> Self {
+        match i {
+            0 => Self::W0,
+            1 => Self::W1,
+            2 => Self::W2,
+            3 => Self::W3,
+            4 => Self::W4,
+            5 => Self::W5,
+            6 => Self::W6,
+            7 => Self::W7,
+            _ => panic!("register with id {i} not supported"),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -75,9 +403,6 @@ impl Offset {
         format!("#{}", self.0)
     }
 }
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub struct Immediate(u64);
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Operand {
@@ -90,7 +415,7 @@ impl Operand {
     pub fn get_str(&self) -> String {
         match self {
             Self::Register(r) => r.get_str(),
-            Self::Immediate(i) => format!("#{}", i.0),
+            Self::Immediate(i) => format!("#{}", i.val),
             Self::Label(l) => l.clone(),
         }
     }
@@ -153,7 +478,14 @@ pub fn gen_syscall(out: &mut String, syscall: Syscall) {
     match syscall {
         Syscall::Exit { res } => {
             gen_move(out, Register::X0, res);
-            gen_move(out, Register::X16, Immediate(1));
+            gen_move(
+                out,
+                Register::X16,
+                Immediate {
+                    val: 1,
+                    byte_size: 1,
+                },
+            );
 
             writeln!(out, "svc #0x80").unwrap();
         }
@@ -165,7 +497,14 @@ pub fn gen_syscall(out: &mut String, syscall: Syscall) {
             gen_move(out, Register::X0, fildes);
             gen_move(out, Register::X1, buf);
             gen_move(out, Register::X2, nbytes);
-            gen_move(out, Register::X16, Immediate(4));
+            gen_move(
+                out,
+                Register::X16,
+                Immediate {
+                    val: 4,
+                    byte_size: 1,
+                },
+            );
 
             writeln!(out, "svc #0x80").unwrap();
         }
@@ -203,127 +542,6 @@ pub fn gen_load_pair(out: &mut String, target1: Register, target2: Register, src
     .unwrap();
 }
 
-// pub struct Var {
-//     pub name: String,
-//     pub byte_size: usize,
-// }
-
-// pub enum Const {
-//     LiteralIsize(isize),
-// }
-
-// pub fn get_const_name(container_name: &str, index: usize) -> String {
-//     format!("{container_name}_const_{index}")
-// }
-
-// pub fn gen_const(output: &mut String, cst: &Const) {
-//     match cst {
-//         Const::LiteralIsize(lit) => output.push_str(&format!(".8byte {lit}\n")),
-//     }
-// }
-
-// pub struct Function {
-//     pub name: String,
-//     pub args: Vec<Var>,
-//     pub local_variables: Vec<Var>,
-//     pub local_consts: Vec<Const>,
-//     pub statements: Vec<Statement>,
-// }
-
-// pub fn gen_function(output: &mut String, fun: &Function) {
-//     gen_fn_prologue(output, fun);
-
-//     // TODO
-
-//     for statement in &fun.statements {
-//         gen_statement(output, statement, fun);
-//     }
-
-//     gen_fn_epilogue(output, fun);
-// }
-
-pub fn calc_stack_size(ctx: &mid_level::Context) -> usize {
-    // FIXME: non 8-byte variables
-
-    let int = (ctx.locals.len() * 8) + 16;
-    let rem = int % 16;
-    if rem == 0 { int } else { int + (16 - rem) }
-}
-
-// pub fn calc_var_stack_offset(fun: &Function, index: usize) -> Indexed {
-//     let offset_bytes = fun
-//         .local_variables
-//         .iter()
-//         .take(index)
-//         .map(|v| v.byte_size)
-//         .sum::<usize>()
-//         + fun.args.iter().map(|v| v.byte_size).sum::<usize>()
-//         + 16;
-
-//     Indexed::Offset(Register::SP, Some(Offset(offset_bytes as i64)))
-// }
-
-// pub fn calc_arg_stack_offset(fun: &Function, index: usize) -> Indexed {
-//     let offset_bytes = fun
-//         .args
-//         .iter()
-//         .take(index)
-//         .map(|v| v.byte_size)
-//         .sum::<usize>()
-//         + 16;
-
-//     Indexed::Offset(Register::SP, Some(Offset(offset_bytes as i64)))
-// }
-
-pub fn gen_fn_prologue(out: &mut String, ctx: &mid_level::Context) {
-    // for (i, cst) in fun.local_consts.iter().enumerate() {
-    //     gen_label(output, &get_const_name(&fun.name, i));
-    //     gen_const(output, cst);
-    // }
-
-    gen_label(out, &ctx.name);
-
-    let stack_size = calc_stack_size(ctx);
-
-    gen_store_pair(
-        out,
-        Register::FP,
-        Register::LR,
-        Indexed::PreIndex(Register::SP, Offset(-(stack_size as i64))),
-    );
-
-    gen_move(out, Register::FP, Register::SP);
-
-    // FIXME: non 8-byte variables
-    for i in 0..ctx.arg_count {
-        let src_reg = Register::from_usize(i);
-
-        gen_store(
-            out,
-            src_reg,
-            get_local_indexed(ctx, &mid_level::Local(i + 1)),
-        );
-    }
-}
-
-pub fn gen_fn_epilogue(out: &mut String, ctx: &mid_level::Context) {
-    gen_label(out, &ctx.get_exit_name());
-
-    let stack_size = calc_stack_size(ctx);
-    gen_load_pair(
-        out,
-        Register::FP,
-        Register::LR,
-        Indexed::PostIndex(Register::SP, Offset(stack_size as i64)),
-    );
-
-    writeln!(out, "ret").unwrap();
-}
-
-pub fn gen_label(out: &mut String, label: &str) {
-    writeln!(out, "{label}:").unwrap();
-}
-
 pub enum Jump {
     Unconditional(String),
 }
@@ -334,36 +552,27 @@ pub fn gen_jump(out: &mut String, jump: Jump) {
     }
 }
 
-// pub fn gen_return(output: &mut String, expr: &Option<Expr>, fun: &Function) {
-//     if let Some(expr) = expr {
-//         gen_eval_expr(output, Register::X0, expr, fun);
-//     }
+pub fn gen_load(out: &mut String, target: Register, src: impl Into<Indexed>, size: usize) {
+    match size {
+        1 => write!(out, "ldrb").unwrap(),
+        2 => write!(out, "ldrh").unwrap(),
+        4 => write!(out, "ldrw").unwrap(),
+        8 => write!(out, "ldr").unwrap(),
+        _ => panic!("unsupported load size: {size}"),
+    }
 
-//     gen_jump(output, Jump::Unconditional(get_fn_exit_label(fun)))
-// }
-
-// pub fn gen_load_const(output: &mut String, target: Register, index: usize, fun: &Function) {
-//     gen_load(
-//         output,
-//         target,
-//         Indexed::Label(get_const_name(&fun.name, index)),
-//     );
-// }
-
-// pub fn gen_load_var(output: &mut String, target: Register, index: usize, fun: &Function) {
-//     gen_load(output, target, calc_var_stack_offset(fun, index));
-// }
-
-// pub fn gen_write_to_var(output: &mut String, src: Register, index: usize, fun: &Function) {
-//     gen_store(output, src, calc_var_stack_offset(fun, index));
-// }
-
-pub fn gen_load(out: &mut String, target: Register, src: impl Into<Indexed>) {
-    writeln!(out, "ldr {}, {}", target.get_str(), src.into().get_str()).unwrap();
+    writeln!(out, " {}, {}", target.get_str(), src.into().get_str()).unwrap();
 }
+pub fn gen_store(out: &mut String, src: Register, target: impl Into<Indexed>, size: usize) {
+    match size {
+        1 => write!(out, "strb").unwrap(),
+        2 => write!(out, "strh").unwrap(),
+        4 => write!(out, "strw").unwrap(),
+        8 => write!(out, "str").unwrap(),
+        _ => panic!("unsupported store size: {size}"),
+    }
 
-pub fn gen_store(out: &mut String, src: Register, target: impl Into<Indexed>) {
-    writeln!(out, "str {}, {}", src.get_str(), target.into().get_str()).unwrap();
+    writeln!(out, " {}, {}", src.get_str(), target.into().get_str()).unwrap();
 }
 
 pub fn gen_load_label(out: &mut String, target: Register, label: &str) {
@@ -386,27 +595,14 @@ pub fn gen_add(out: &mut String, target: Register, source1: Register, source2: i
     .unwrap();
 }
 
+pub fn gen_label(out: &mut String, label: &str) {
+    writeln!(out, "{label}:").unwrap();
+}
+
 pub enum Callable {
     Label(String),
     Address(Register),
 }
-
-// pub struct FnCall {
-//     fun: Callable,
-//     args: Vec<Expr>,
-// }
-
-// pub struct Context {
-//     used_regs: Vec<Register>,
-// }
-
-// pub fn gen_fn_call(output: &mut String, fn_call: &FnCall, src_fun: &Function) {
-//     for (i, arg) in fn_call.args.iter().enumerate() {
-//         gen_eval_expr(output, Register::from_usize(i), arg, src_fun);
-//     }
-
-//     gen_branch_with_link(output, &fn_call.fun);
-// }
 
 pub fn gen_branch_with_link(out: &mut String, callable: &Callable) {
     match callable {
@@ -414,66 +610,6 @@ pub fn gen_branch_with_link(out: &mut String, callable: &Callable) {
         Callable::Address(reg) => writeln!(out, "blr {}", reg.get_str()).unwrap(),
     }
 }
-
-// pub struct VarAssign {
-//     pub target_index: usize,
-//     pub source: Expr,
-// }
-
-// pub fn gen_var_assign(output: &mut String, var_assign: &VarAssign, fun: &Function) {
-//     gen_eval_expr(output, Register::X0, &var_assign.source, fun);
-
-//     gen_write_to_var(output, Register::X0, var_assign.target_index, fun);
-// }
-
-// pub enum Expr {
-//     // FnCall(FnCall),
-//     Constant(usize),
-//     Local(usize),
-// }
-
-// pub fn gen_eval_expr(output: &mut String, target: Register, expr: &Expr, fun: &Function) {
-//     match expr {
-//         Expr::Constant(const_idx) => gen_load_const(output, target, *const_idx, fun),
-//         Expr::Local(local_idx) => gen_load_var(output, target, *local_idx, fun),
-//         Expr::FnCall(fn_call) => {
-//             gen_fn_call(output, fn_call, fun);
-//             gen_move(output, target, Register::X0);
-//         }
-//     }
-// }
-
-// pub enum Statement {
-//     FnCall(FnCall),
-//     Assign(VarAssign),
-//     Return(Option<Expr>),
-// }
-
-// pub fn gen_statement(output: &mut String, statement: &Statement, fun: &Function) {
-//     match statement {
-//         Statement::Assign(var_assign) => gen_var_assign(output, var_assign, fun),
-//         Statement::FnCall(fn_call) => gen_fn_call(output, fn_call, fun),
-//         Statement::Return(expr) => gen_return(output, expr, fun),
-//     }
-// }
-
-// pub struct Program {
-//     pub functions: Vec<Function>,
-// }
-
-// pub fn gen_program(output: &mut String, program: &Program) {
-//     gen_arch_header(output);
-
-//     gen_text_section_header(output);
-
-//     gen_rt(output);
-
-//     for fun in &program.functions {
-//         gen_function(output, fun);
-//     }
-
-//     gen_data_section_header(output);
-// }
 
 pub fn gen_arch_header(out: &mut String) {
     writeln!(out, ".global {ENTRY}").unwrap();
@@ -498,156 +634,4 @@ pub fn gen_rt(out: &mut String) {
             res: Operand::Register(Register::X0),
         },
     );
-}
-
-pub fn gen_from_context(out: &mut String, ctx: &mid_level::Context) {
-    if let Some(asm) = &ctx.assembly {
-        gen_label(out, &ctx.name);
-
-        out.push_str(asm);
-        out.push('\n');
-
-        writeln!(out, "ret").unwrap();
-    } else {
-        gen_fn_prologue(out, ctx);
-
-        for bb in &ctx.basic_blocks {
-            gen_bb(out, ctx, bb);
-        }
-
-        gen_fn_epilogue(out, ctx);
-    }
-}
-
-pub fn gen_bb(out: &mut String, ctx: &mid_level::Context, bb: &mid_level::BasicBlock) {
-    gen_label(out, &ctx.get_bb_name(bb.id));
-
-    for tac in &bb.tacs {
-        gen_tac(out, ctx, tac);
-    }
-
-    gen_term(out, ctx, &bb.terminator);
-}
-
-pub fn gen_tac(out: &mut String, ctx: &mid_level::Context, tac: &mid_level::Tac) {
-    gen_load_source(out, ctx, &tac.source, Register::X0);
-
-    // FIXME: This is a hacky solution for storing the return
-    // value.
-    if tac.target.0 == 0 {
-        return;
-    }
-
-    gen_store_in_local(out, ctx, Register::X0, &tac.target);
-}
-
-pub fn gen_term(out: &mut String, ctx: &mid_level::Context, term: &mid_level::Terminator) {
-    use mid_level::Terminator;
-    match term {
-        Terminator::Return => gen_jump(out, Jump::Unconditional(ctx.get_exit_name())),
-        Terminator::Goto(goto) => gen_jump_to_bb(out, ctx, *goto),
-        Terminator::GotoCond(cond, success, failure) => {
-            gen_load_source(out, ctx, cond, Register::X0);
-
-            writeln!(
-                out,
-                "cmp {}, {}",
-                Register::X0.get_str(),
-                Register::XZR.get_str()
-            )
-            .unwrap();
-
-            writeln!(out, "bne {}", ctx.get_bb_name(*success)).unwrap();
-            writeln!(out, "b {}", ctx.get_bb_name(*failure)).unwrap();
-        }
-    }
-}
-
-pub fn gen_jump_to_bb(out: &mut String, ctx: &mid_level::Context, bbid: usize) {
-    writeln!(out, "b {}", ctx.get_bb_name(bbid)).unwrap();
-}
-
-pub fn gen_load_source(
-    out: &mut String,
-    ctx: &mid_level::Context,
-    source: &mid_level::Source,
-    target: Register,
-) {
-    use mid_level::Source;
-    match source {
-        Source::Immediate(imm) => gen_move(out, target, Immediate(imm.val)),
-        Source::Local(l) => gen_load_local(out, ctx, l, target),
-        Source::Global(g) => gen_load_global(out, ctx, g, target),
-        Source::FnCall(fn_call) => gen_fn_call(out, ctx, fn_call, target),
-    }
-}
-
-pub fn gen_store_in_local(
-    out: &mut String,
-    ctx: &mid_level::Context,
-    source: Register,
-    target: &mid_level::Local,
-) {
-    gen_store(out, source, get_local_indexed(ctx, target));
-}
-
-pub fn gen_load_local(
-    out: &mut String,
-    ctx: &mid_level::Context,
-    source: &mid_level::Local,
-    target: Register,
-) {
-    gen_load(out, target, get_local_indexed(ctx, source));
-}
-
-pub fn get_local_indexed(ctx: &mid_level::Context, local: &mid_level::Local) -> Indexed {
-    // FIXME: non 8-byte variables
-
-    let location = (local.0 - 1) * 8 + 16;
-    Indexed::Offset(Register::SP, Some(Offset(location as i64)))
-}
-
-pub fn gen_load_global(
-    out: &mut String,
-    ctx: &mid_level::Context,
-    source: &mid_level::Global,
-    target: Register,
-) {
-    gen_load(out, target, get_global_indexed(ctx, source));
-}
-
-pub fn get_global_indexed(ctx: &mid_level::Context, global: &mid_level::Global) -> Indexed {
-    todo!()
-}
-
-pub fn gen_fn_call(
-    out: &mut String,
-    ctx: &mid_level::Context,
-    fn_call: &mid_level::FnCall,
-    target: Register,
-) {
-    for (i, arg) in fn_call.args.iter().enumerate() {
-        gen_load_arg(out, ctx, arg, Register::from_usize(i));
-    }
-
-    match &fn_call.callable {
-        mid_level::Callable::FnPointer(f) => todo!(),
-        mid_level::Callable::Named(n) => gen_branch_with_link(out, &Callable::Label(n.clone())),
-    }
-
-    gen_move(out, target, Register::X0);
-}
-
-pub fn gen_load_arg(
-    out: &mut String,
-    ctx: &mid_level::Context,
-    source: &mid_level::Arg,
-    target: Register,
-) {
-    use mid_level::Arg;
-    match source {
-        Arg::Global(g) => gen_load_global(out, ctx, g, target),
-        Arg::Local(l) => gen_load_local(out, ctx, l, target),
-        Arg::Immediate(imm) => gen_move(out, target, Immediate(imm.val)),
-    }
 }

@@ -1,5 +1,6 @@
-fn main() -> i64 {
-    let a = 0;
+fn main() -> u8 {
+    let a: u8 = 0;
+
     while a < 10 {
         a = a + 1;
     }
@@ -7,7 +8,7 @@ fn main() -> i64 {
     return fib(a);
 }
 
-fn fib(n: u64) -> u64 {
+fn fib(n: u8) -> u8 {
     if n <= 1 {
         return n;
     }
