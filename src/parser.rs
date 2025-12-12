@@ -8,7 +8,9 @@ use qparse::{
     to_optional, use_first,
     whitespace::{whitespace, whitespace_wrapped},
 };
-use std::str::FromStr;
+use std::{collections::HashMap, str::FromStr};
+
+use crate::codegen::Layout;
 
 #[derive(Debug)]
 pub struct Module {
@@ -19,14 +21,30 @@ pub struct Module {
 pub struct Function {
     pub name: Ident,
     pub args: Vec<TypedIdent>,
-    pub ret_ty: Option<Ident>,
+    pub ret_ty: Option<Type>,
     pub block: Block,
 }
 
 #[derive(Debug, Clone)]
+pub struct Type {
+    pub name: Ident,
+    pub is_ref: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct TypeId(pub usize);
+
+pub struct TypeInfo {
+    pub name: Ident,
+    pub layout: Layout,
+}
+
+type TypeMap = HashMap<TypeId, TypeInfo>;
+
+#[derive(Debug, Clone)]
 pub struct TypedIdent {
     pub ident: Ident,
-    pub ty: Ident,
+    pub ty: Type,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +103,20 @@ pub struct Ident(pub String);
 pub enum Expr {
     EVal(Box<Value>),
     EBin(BinExpr),
+    EUn(UnExpr),
+}
+
+#[derive(Debug, Clone)]
+pub struct UnExpr {
+    pub op: UnOp,
+    pub rhs: Box<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub enum UnOp {
+    Not,
+    Ref,
+    Deref,
 }
 
 #[derive(Debug, Clone)]
@@ -324,13 +356,25 @@ fn parse_typed_ident(input: &str) -> ParseRes<&str, TypedIdent> {
     Ok((input, TypedIdent { ident, ty }))
 }
 
-fn parse_type(input: &str) -> ParseRes<&str, Ident> {
+fn parse_type(input: &str) -> ParseRes<&str, Type> {
+    let (input, is_ref) = if let Ok((input, _)) = tag('&').parse(input) {
+        (input, true)
+    } else {
+        (input, false)
+    };
+
     let (input, raw) = alpha1(input)?;
     let (input, tail) = alpha_num0(input)?;
 
     let mut res = String::from(raw);
     res.push_str(tail);
-    Ok((input, Ident(res)))
+    Ok((
+        input,
+        Type {
+            name: Ident(res),
+            is_ref,
+        },
+    ))
 }
 
 fn parse_ident(input: &str) -> ParseRes<&str, Ident> {
@@ -343,7 +387,27 @@ fn parse_ident(input: &str) -> ParseRes<&str, Ident> {
 }
 
 fn parse_basic_expr(input: &str) -> ParseRes<&str, Expr> {
-    parse_cmp(input)
+    use_first([parse_unary_expression, parse_cmp]).parse(input)
+}
+
+fn parse_unary_expression(input: &str) -> ParseRes<&str, Expr> {
+    let (input, op) = use_first([char('!'), char('&'), char('*')]).parse(input)?;
+    let (input, rhs) = preceded(whitespace, parse_basic_expr).parse(input)?;
+
+    let op = match op {
+        '!' => UnOp::Not,
+        '&' => UnOp::Ref,
+        '*' => UnOp::Deref,
+        _ => unreachable!(),
+    };
+
+    Ok((
+        input,
+        Expr::EUn(UnExpr {
+            op,
+            rhs: Box::new(rhs),
+        }),
+    ))
 }
 
 fn parse_parens(input: &str) -> ParseRes<&str, Expr> {

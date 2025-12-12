@@ -1,5 +1,5 @@
 //! Goal
-//! llvm-like ir so there is no register limit (stack).
+//! Mid level representation that will be useful for analysis in the future
 //!
 //! function:
 //!  arg_count
@@ -8,15 +8,34 @@
 //! register 0 is the return register
 //! registers 1..=arg_count are the arguments. Locals are allocated indecies after this.
 
-use std::sync::LazyLock;
+use std::{collections::HashMap, sync::LazyLock};
 
-use crate::parser::{
-    self, BinExpr, BinOp, Block, Expr, Ident, Literal, Module, RawAssign, RawDef, RawIf, RawReturn,
-    RawWhile, Statement, TypedIdent, Value,
+use crate::{
+    codegen::Layout,
+    parser::{
+        self, BinExpr, BinOp, Block, Expr, Ident, Literal, Module, RawAssign, RawDef, RawIf,
+        RawReturn, RawWhile, Statement, TypedIdent, UnExpr, UnOp, Value,
+    },
 };
 
 pub static RETURN_ARG_IDENT: LazyLock<Ident> = LazyLock::new(|| Ident(String::from("return_args")));
 const RETURN_ARG_LOCAL: LocalId = LocalId(0);
+
+#[derive(Debug, Clone)]
+pub struct Type {
+    pub id: TypeId,
+    pub is_ref: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct TypeId(pub usize);
+
+pub struct TypeInfo {
+    pub name: Ident,
+    pub layout: Layout,
+}
+
+type TypeMap = HashMap<TypeId, TypeInfo>;
 
 #[derive(Debug, Clone)]
 pub struct BasicBlock {
@@ -41,9 +60,12 @@ pub enum Source {
 }
 
 impl Source {
-    pub fn get_type(&self, ctx: &Context) -> Option<Ident> {
+    pub fn get_type(&self, ctx: &Context) -> Type {
         match self {
-            Self::Immediate(_) => Some(Ident("u64".into())),
+            Self::Immediate(_) => Type {
+                name: Ident("u64".into()),
+                is_ref: false,
+            },
             Self::Local(l) => ctx.locals[l.0].1.clone(),
             Self::Global(g) => todo!("global types"),
             Self::FnCall(fncall) => fncall.ret_ty.clone(),
@@ -71,7 +93,7 @@ pub enum Callable {
 
 #[derive(Debug, Clone)]
 pub struct FnCall {
-    pub ret_ty: Option<Ident>,
+    pub ret_ty: Type,
     pub callable: Callable,
     pub args: Vec<Arg>,
 }
@@ -84,6 +106,9 @@ pub enum Arg {
 }
 
 #[derive(Debug, Clone)]
+pub struct ConstId(pub usize);
+
+#[derive(Debug, Clone)]
 pub enum Terminator {
     Goto(usize),
     GotoCond(Source, usize, usize),
@@ -93,14 +118,25 @@ pub enum Terminator {
 #[derive(Debug, Clone)]
 pub struct Context<'src> {
     module: &'src parser::Module,
-    pub name: String,
-    pub locals: Vec<(Option<Ident>, Option<Ident>)>,
+    fn_id: usize,
+    pub locals: Vec<(Option<Ident>, Type)>,
     pub globals: &'src [Ident],
     pub basic_blocks: Vec<BasicBlock>,
     pub arg_count: usize,
     pub assembly: Option<String>,
     current_bb: usize,
     loop_info: Option<(usize, Vec<usize>)>,
+}
+
+fn get_ty(ty: Option<Type>) -> Type {
+    if let Some(ty) = ty {
+        ty
+    } else {
+        Type {
+            name: Ident("()".into()),
+            is_ref: false,
+        }
+    }
 }
 
 impl<'src> Context<'src> {
@@ -111,22 +147,23 @@ impl<'src> Context<'src> {
     pub fn from_asm_fn(
         globals: &'src [Ident],
         module: &'src Module,
-        fn_index: usize,
+        fn_id: usize,
         assembly: Option<String>,
     ) -> Self {
-        let fun = &module.functions[fn_index];
-        let mut locals = vec![(Some(RETURN_ARG_IDENT.clone()), fun.ret_ty.clone())];
+        let fun = &module.functions[fn_id];
+        let mut locals = vec![(Some(RETURN_ARG_IDENT.clone()), get_ty(fun.ret_ty.clone()))];
         let arg_count = fun.args.len();
         let mut args: Vec<_> = fun
             .args
             .iter()
             .cloned()
-            .map(|a| (Some(a.ident), Some(a.ty)))
+            .map(|a| (Some(a.ident), a.ty))
             .collect();
+
         locals.append(&mut args);
 
         Self {
-            name: fun.name.0.clone(),
+            fn_id,
             locals,
             globals,
             basic_blocks: Vec::new(),
@@ -148,7 +185,7 @@ impl<'src> Context<'src> {
         let new_local = LocalId(self.locals.len());
 
         self.locals
-            .push((Some(ident.ident.clone()), Some(ident.ty.clone())));
+            .push((Some(ident.ident.clone()), ident.ty.clone()));
 
         return new_local;
     }
@@ -163,7 +200,7 @@ impl<'src> Context<'src> {
         todo!();
     }
 
-    pub fn resolve_function_return_type(&self, fn_name: &Ident) -> Option<Ident> {
+    pub fn resolve_function_return_type(&self, fn_name: &Ident) -> Option<Type> {
         self.module
             .functions
             .iter()
@@ -171,7 +208,7 @@ impl<'src> Context<'src> {
             .expect("could not find specified function")
     }
 
-    pub fn get_anonymous_local(&mut self, ty: &Option<Ident>) -> LocalId {
+    pub fn get_anonymous_local(&mut self, ty: &Type) -> LocalId {
         self.locals.push((None, ty.clone()));
 
         return LocalId(self.locals.len() - 1);
@@ -276,11 +313,85 @@ impl<'src> Context<'src> {
     }
 
     pub fn get_bb_name(&self, bbid: usize) -> String {
-        format!("{}_bb{bbid}", self.name)
+        format!("{}_bb{bbid}", self.get_name())
     }
 
     pub fn get_exit_name(&self) -> String {
-        format!("{}_exit", self.name)
+        format!("{}_exit", self.get_name())
+    }
+
+    pub fn get_base_fn(&self) -> &parser::Function {
+        &self.module.functions[self.fn_id]
+    }
+
+    pub fn get_name(&self) -> &str {
+        &self.get_base_fn().name.0
+    }
+
+    pub fn pretty_print(&self) {
+        let base = self.get_base_fn();
+
+        println!(
+            "fn {}() -> {} {{",
+            &base.name.0,
+            get_ty(base.ret_ty.clone()).name.0
+        );
+
+        for (i, l) in self.locals.iter().enumerate() {
+            print!("\tlet _{i}: {};", &l.1.name.0,);
+            if l.0.is_some() {
+                println!("// {}", l.0.as_ref().unwrap().0);
+            } else {
+                println!();
+            }
+        }
+
+        fn fmt_src(src: &Source) -> String {
+            match src {
+                Source::Local(l) => format!("_{}", l.0),
+                Source::Global(g) => todo!("globals"),
+                Source::FnCall(f) => format!(
+                    "{}({})",
+                    match &f.callable {
+                        Callable::FnPointer(f) => todo!("fn pointers"),
+                        Callable::Named(n) => n,
+                    },
+                    f.args
+                        .iter()
+                        .map(|v| match v {
+                            Arg::Local(l) => format!("_{}, ", l.0),
+                            Arg::Global(g) => todo!("globals"),
+                            Arg::Immediate(imm) => format!("{}, ", imm.val),
+                        })
+                        .collect::<String>()
+                ),
+                Source::Immediate(imm) => format!("{}", imm.val),
+            }
+        }
+
+        for (i, bb) in self.basic_blocks.iter().enumerate() {
+            println!("\tbb{i} {{");
+
+            for tac in &bb.tacs {
+                println!("\t\t_{} = {};", tac.target.0, fmt_src(&tac.source));
+            }
+
+            println!(
+                "\t\t{};",
+                match &bb.terminator {
+                    Terminator::Return => format!("return"),
+                    Terminator::Goto(target) => format!("goto bb{target}"),
+                    Terminator::GotoCond(cond, success, failure) => format!(
+                        "if {} goto bb{success} else goto bb{failure}",
+                        fmt_src(cond)
+                    ),
+                }
+            );
+
+            println!("\t}}");
+        }
+
+        println!("}}");
     }
 }
 
@@ -463,6 +574,7 @@ pub fn gen_expr(ctx: &mut Context, expr: &Expr, target_byte_size: usize) -> Opti
     match expr {
         Expr::EBin(bin) => Some(gen_bin_expr(ctx, bin, target_byte_size)),
         Expr::EVal(value) => gen_value_expr(ctx, value, target_byte_size),
+        Expr::EUn(un) => Some(gen_unary_expr(ctx, un, target_byte_size)),
     }
 }
 
@@ -486,10 +598,30 @@ pub fn gen_bin_expr(ctx: &mut Context, bin: &BinExpr, target_byte_size: usize) -
         BinOp::Exp => "exp",
     };
     Source::FnCall(FnCall {
-        ret_ty: Some(Ident(format!("u{}", target_byte_size * 8))), // FIXME: THIS IS A HORRIBLE HACK
+        ret_ty: Type {
+            name: Ident(format!("u{}", target_byte_size * 8)),
+            is_ref: false,
+        }, // FIXME: THIS IS A HORRIBLE HACK
         callable: Callable::Named(op.into()),
         args: vec![lhs, rhs],
     })
+}
+
+pub fn gen_unary_expr(ctx: &mut Context, un: &UnExpr, target_byte_size: usize) -> Source {
+    let rhs = gen_expr_arg(ctx, &*un.rhs, target_byte_size)
+        .expect("expression used in a binary operation must yeild a value");
+    match un.op {
+        UnOp::Not => Source::FnCall(FnCall {
+            ret_ty: Type {
+                name: Ident(format!("u{}", target_byte_size * 8)),
+                is_ref: false,
+            }, // FIXME: THIS IS A HORRIBLE HACK
+            callable: Callable::Named("not".into()),
+            args: vec![rhs],
+        }),
+        UnOp::Ref => todo!(),
+        UnOp::Deref => todo!(),
+    }
 }
 
 pub fn gen_value_expr(ctx: &mut Context, value: &Value, target_byte_size: usize) -> Option<Source> {
@@ -516,7 +648,7 @@ pub fn gen_value_expr(ctx: &mut Context, value: &Value, target_byte_size: usize)
                 .collect();
 
             Some(Source::FnCall(FnCall {
-                ret_ty: ctx.resolve_function_return_type(&fncall.name),
+                ret_ty: get_ty(ctx.resolve_function_return_type(&fncall.name)),
                 callable: Callable::Named(fncall.name.0.clone()),
                 args,
             }))
@@ -533,7 +665,7 @@ pub fn gen_expr_arg(ctx: &mut Context, e: &Expr, target_byte_size: usize) -> Opt
             Source::Local(l) => Arg::Local(l),
             Source::Global(g) => Arg::Global(g),
             Source::FnCall(fncall) => {
-                let anon = ctx.get_anonymous_local(&fncall.ret_ty);
+                let anon = ctx.get_anonymous_local(&fncall.ret_ty.clone());
                 ctx.add_tac_to_bb(Tac {
                     target: anon,
                     source: Source::FnCall(fncall),

@@ -28,9 +28,10 @@ impl<'src> CGContext<'src> {
                 .locals
                 .iter()
                 .map(|v| {
-                    v.1.as_ref()
-                        .map(|v| types.get(v).unwrap().clone())
-                        .unwrap_or(Layout { byte_size: 0 })
+                    types
+                        .get(&v)
+                        .expect(&format!("type {} not found", v.1.0))
+                        .clone()
                 })
                 .collect(),
             mid_level,
@@ -93,7 +94,7 @@ impl<'src> CGContext<'src> {
 
     pub fn generate(&mut self, out: &mut String) {
         if let Some(asm) = &self.mid_level.assembly {
-            gen_label(out, &self.mid_level.name);
+            gen_label(out, self.mid_level.get_name());
 
             out.push_str(&asm);
             out.push('\n');
@@ -111,7 +112,7 @@ impl<'src> CGContext<'src> {
     }
 
     pub fn gen_fn_prologue(&mut self, out: &mut String) {
-        gen_label(out, &self.mid_level.name);
+        gen_label(out, self.mid_level.get_name());
 
         let stack_size = self.calc_stack_size();
 

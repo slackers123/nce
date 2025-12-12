@@ -28,6 +28,11 @@ eq:
     cset    x0, eq
     ret
 
+// fn not(a: u64) -> u64
+not:
+    mvn x0, x0
+    ret
+
 // fn add(a: u64, b: u64) -> u64
 add:
     add x0, x0, x1

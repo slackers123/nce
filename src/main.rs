@@ -1,20 +1,46 @@
 //! A toy language to try my hands with runtime code generation and
 //! maybe making it safe to call runtime generated code?
+//!
+//! # Order Of Operations (goal)
+//! Lexer -> Parser -> High Level (type resolution) -> Mid Level (flow analysis) -> Codegen
+//!
+//! ## Lexer:
+//! Turns the source file into a stream of tokens
+//!
+//! ## Parser:
+//! Turns the token stream from the lexer into an AST
+//!
+//! ## High Level:
+//! Desugaring, type checking, make implicit references explicit, type resolution
+//!
+//! ## Mid Level:
+//! Flow analysis
+//!
+//! ## Codegen
+//! Turn the Control flow graph from the mid level into assembly code
+//!
+//! ## Assembler?
+//! turn the assembly into machine code
+//!
+//! ## Linker?
+//! link the machine code together
+//!
+//! # Order Of Operations (current)
+//! Parser -> Mid Level -> Codegen
 
 use std::{collections::HashMap, fs};
 
 use crate::parser::Ident;
 
+pub mod ast;
 pub mod bc;
 pub mod codegen;
+pub mod high_level;
 pub mod mid_level;
 pub mod myvec;
 pub mod parser;
 
 fn main() {
-    // mid_level::test();
-    // parser::test();
-
     let file = "main.nce";
 
     let res = fs::read_to_string(file).unwrap();
@@ -30,6 +56,7 @@ fn main() {
         parser::Ident("add".into()),
         parser::Ident("sub".into()),
         parser::Ident("eq".into()),
+        parser::Ident("not".into()),
         parser::Ident("gt".into()),
         parser::Ident("gte".into()),
         parser::Ident("lt".into()),
@@ -57,6 +84,13 @@ fn main() {
     type_map.insert(Ident("u32".into()), codegen::Layout { byte_size: 4 });
     type_map.insert(Ident("u16".into()), codegen::Layout { byte_size: 2 });
     type_map.insert(Ident("u8".into()), codegen::Layout { byte_size: 1 });
+    type_map.insert(Ident("()".into()), codegen::Layout { byte_size: 0 });
+
+    println!("formatted:");
+
+    for ctx in &ctxs {
+        ctx.pretty_print();
+    }
 
     for ctx in ctxs {
         let mut ctx = codegen::CGContext::from_mid_level(&type_map, ctx);
@@ -81,6 +115,8 @@ fn main() {
     if !assembled {
         panic!("failed to compile");
     }
+
+    println!("RUNNING:");
 
     let res = std::process::Command::new("./output")
         .spawn()
