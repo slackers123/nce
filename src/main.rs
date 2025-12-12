@@ -32,6 +32,7 @@ use std::{collections::HashMap, fs};
 
 use crate::parser::Ident;
 
+pub mod arch;
 pub mod ast;
 pub mod bc;
 pub mod codegen;
