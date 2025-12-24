@@ -21,13 +21,15 @@ use crate::{
 pub static RETURN_ARG_IDENT: LazyLock<Ident> = LazyLock::new(|| Ident(String::from("return_args")));
 const RETURN_ARG_LOCAL: LocalId = LocalId(0);
 
-#[derive(Debug, Clone)]
+const EMPTY_TYPE_ID: TypeId = TypeId(0);
+
+#[derive(Debug, Clone, PartialEq, Hash)]
 pub struct Type {
     pub id: TypeId,
     pub is_ref: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Hash)]
 pub struct TypeId(pub usize);
 
 pub struct TypeInfo {
@@ -35,7 +37,7 @@ pub struct TypeInfo {
     pub layout: Layout,
 }
 
-type TypeMap = HashMap<TypeId, TypeInfo>;
+pub type TypeMap = HashMap<TypeId, TypeInfo>;
 
 #[derive(Debug, Clone)]
 pub struct BasicBlock {
@@ -63,7 +65,7 @@ impl Source {
     pub fn get_type(&self, ctx: &Context) -> Type {
         match self {
             Self::Immediate(_) => Type {
-                name: Ident("u64".into()),
+                id: TypeId(ctx.get_type_id(Ident("u64".into()))),
                 is_ref: false,
             },
             Self::Local(l) => ctx.locals[l.0].1.clone(),
@@ -128,17 +130,6 @@ pub struct Context<'src> {
     loop_info: Option<(usize, Vec<usize>)>,
 }
 
-fn get_ty(ty: Option<Type>) -> Type {
-    if let Some(ty) = ty {
-        ty
-    } else {
-        Type {
-            name: Ident("()".into()),
-            is_ref: false,
-        }
-    }
-}
-
 impl<'src> Context<'src> {
     pub fn from_fn(globals: &'src [Ident], module: &'src Module, fn_index: usize) -> Self {
         Self::from_asm_fn(globals, module, fn_index, None)
@@ -151,7 +142,9 @@ impl<'src> Context<'src> {
         assembly: Option<String>,
     ) -> Self {
         let fun = &module.functions[fn_id];
+
         let mut locals = vec![(Some(RETURN_ARG_IDENT.clone()), get_ty(fun.ret_ty.clone()))];
+
         let arg_count = fun.args.len();
         let mut args: Vec<_> = fun
             .args

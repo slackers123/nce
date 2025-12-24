@@ -25,7 +25,7 @@ pub struct Function {
     pub block: Block,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Hash)]
 pub struct Type {
     pub name: Ident,
     pub is_ref: bool,

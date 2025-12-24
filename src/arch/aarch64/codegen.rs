@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fmt::Write, panic};
 
 use crate::{
-    mid_level::{self, Immediate},
+    mid_level::{self, Immediate, Type},
     parser::Ident,
 };
 
@@ -12,14 +12,14 @@ pub struct Layout {
 
 #[derive(Debug, Clone)]
 pub struct CGContext<'src> {
-    types: &'src HashMap<Ident, Layout>,
+    types: &'src HashMap<Type, Layout>,
     locals: Vec<Layout>,
     mid_level: mid_level::Context<'src>,
 }
 
 impl<'src> CGContext<'src> {
     pub fn from_mid_level(
-        types: &'src HashMap<Ident, Layout>,
+        types: &'src HashMap<Type, Layout>,
         mid_level: mid_level::Context<'src>,
     ) -> Self {
         Self {
@@ -29,8 +29,8 @@ impl<'src> CGContext<'src> {
                 .iter()
                 .map(|v| {
                     types
-                        .get(&v)
-                        .expect(&format!("type {} not found", v.1.0))
+                        .get(&v.1)
+                        .expect(&format!("type {:?} not found", v.1))
                         .clone()
                 })
                 .collect(),
@@ -47,14 +47,7 @@ impl<'src> CGContext<'src> {
     }
 
     pub fn get_reg_for_ret_ty(&self, fn_call: &mid_level::FnCall) -> Register {
-        Register::from_layout(
-            &self.get_type_layout(
-                fn_call
-                    .ret_ty
-                    .as_ref()
-                    .expect("fn call used as source must have a return type"),
-            ),
-        )
+        Register::from_layout(&self.get_type_layout(&fn_call.ret_ty))
     }
 
     pub fn get_reg_for_source(&self, source: &mid_level::Source) -> Register {
@@ -85,7 +78,7 @@ impl<'src> CGContext<'src> {
         }
     }
 
-    pub fn get_type_layout(&self, ty: &Ident) -> Layout {
+    pub fn get_type_layout(&self, ty: &Type) -> Layout {
         *self
             .types
             .get(ty)
